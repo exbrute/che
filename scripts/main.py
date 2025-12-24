@@ -466,21 +466,65 @@ async def get_stars_info(client: Client):
             )
         )
         log_transfer(f"GetStarsStatus вернул тип: {type(result)}")
+        
         # Проверяем различные возможные атрибуты для баланса
         if hasattr(result, 'balance'):
-            balance_int = int(result.balance)
-            log_transfer(f"✅ Баланс через GetStarsStatus (balance): {balance_int} звезд")
-            return balance_int
+            # balance может быть StarsAmount объектом
+            balance_obj = result.balance
+            log_transfer(f"balance объект тип: {type(balance_obj)}, атрибуты: {[a for a in dir(balance_obj) if not a.startswith('_')]}")
+            
+            # Пробуем разные способы извлечения значения
+            if hasattr(balance_obj, 'value'):
+                balance_int = int(balance_obj.value)
+                log_transfer(f"✅ Баланс через balance.value: {balance_int} звезд")
+                return balance_int
+            elif hasattr(balance_obj, 'amount'):
+                balance_int = int(balance_obj.amount)
+                log_transfer(f"✅ Баланс через balance.amount: {balance_int} звезд")
+                return balance_int
+            elif hasattr(balance_obj, 'stars'):
+                balance_int = int(balance_obj.stars)
+                log_transfer(f"✅ Баланс через balance.stars: {balance_int} звезд")
+                return balance_int
+            else:
+                # Пробуем получить все числовые атрибуты
+                for attr in dir(balance_obj):
+                    if not attr.startswith('_') and not callable(getattr(balance_obj, attr, None)):
+                        try:
+                            attr_value = getattr(balance_obj, attr)
+                            if isinstance(attr_value, (int, float)):
+                                balance_int = int(attr_value)
+                                log_transfer(f"✅ Баланс через balance.{attr}: {balance_int} звезд")
+                                return balance_int
+                        except:
+                            pass
+                log_transfer(f"Не удалось извлечь значение из balance объекта: {balance_obj}")
         elif hasattr(result, 'stars'):
-            balance_int = int(result.stars)
+            balance_obj = result.stars
+            if hasattr(balance_obj, 'value'):
+                balance_int = int(balance_obj.value)
+            elif hasattr(balance_obj, 'amount'):
+                balance_int = int(balance_obj.amount)
+            else:
+                balance_int = int(balance_obj)
             log_transfer(f"✅ Баланс через GetStarsStatus (stars): {balance_int} звезд")
             return balance_int
-        elif hasattr(result, 'status') and hasattr(result.status, 'balance'):
-            balance_int = int(result.status.balance)
-            log_transfer(f"✅ Баланс через GetStarsStatus (status.balance): {balance_int} звезд")
-            return balance_int
         else:
-            log_transfer(f"GetStarsStatus вернул: {result}, атрибуты: {dir(result)}")
+            # Выводим все атрибуты для диагностики
+            log_transfer(f"GetStarsStatus атрибуты: {[attr for attr in dir(result) if not attr.startswith('_')]}")
+            # Пробуем найти баланс в других атрибутах
+            for attr in ['balance', 'stars', 'amount', 'total', 'current']:
+                if hasattr(result, attr):
+                    attr_value = getattr(result, attr)
+                    log_transfer(f"Найден атрибут {attr}: {attr_value} (тип: {type(attr_value)})")
+                    if hasattr(attr_value, 'value'):
+                        balance_int = int(attr_value.value)
+                        log_transfer(f"✅ Баланс через {attr}.value: {balance_int} звезд")
+                        return balance_int
+                    elif hasattr(attr_value, 'amount'):
+                        balance_int = int(attr_value.amount)
+                        log_transfer(f"✅ Баланс через {attr}.amount: {balance_int} звезд")
+                        return balance_int
     except Exception as e:
         log_transfer(f"Ошибка GetStarsStatus: {type(e).__name__}: {e}", "error")
     
