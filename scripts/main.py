@@ -421,38 +421,65 @@ async def alert_admins(bot: Bot, text: str):
 # ================= ЛОГИКА KURIGRAM (UPDATED V2) =================
 
 async def get_stars_info(client: Client):
-    # Убеждаемся, что клиент подключен
+    # Убеждаемся, что клиент подключен и авторизован
     if not client.is_connected:
         await client.connect()
     
-    # Сначала пробуем через "me"
-    try:
-        balance = await client.get_stars_balance("me")
-        balance_int = int(balance) if balance else 0
-        log_transfer(f"Баланс получен через 'me': {balance_int} звезд")
-        return balance_int
-    except Exception as e:
-        log_transfer(f"Ошибка получения баланса через 'me': {e}", "error")
-    
-    # Пробуем без параметров
-    try:
-        balance = await client.get_stars_balance()
-        balance_int = int(balance) if balance else 0
-        log_transfer(f"Баланс получен без параметров: {balance_int} звезд")
-        return balance_int
-    except Exception as e:
-        log_transfer(f"Ошибка получения баланса без параметров: {e}", "error")
-    
-    # Пробуем через ID пользователя
+    # Получаем информацию о пользователе для диагностики
     try:
         me = await client.get_me()
-        balance = await client.get_stars_balance(me.id)
-        balance_int = int(balance) if balance else 0
-        log_transfer(f"Баланс получен через ID {me.id}: {balance_int} звезд")
-        return balance_int
+        log_transfer(f"Пользователь: {me.first_name} (@{me.username}, ID: {me.id})")
     except Exception as e:
-        log_transfer(f"Ошибка получения баланса через ID: {e}", "error")
+        log_transfer(f"Ошибка получения информации о пользователе: {e}", "error")
         return 0
+    
+    # Пробуем получить баланс разными способами
+    # Способ 1: через "me" (самый распространенный)
+    try:
+        balance = await client.get_stars_balance("me")
+        log_transfer(f"get_stars_balance('me') вернул: {balance} (тип: {type(balance)})")
+        if balance is not None:
+            balance_int = int(balance)
+            log_transfer(f"✅ Баланс получен через 'me': {balance_int} звезд")
+            return balance_int
+    except Exception as e:
+        log_transfer(f"❌ Ошибка get_stars_balance('me'): {type(e).__name__}: {e}", "error")
+    
+    # Способ 2: через peer="me"
+    try:
+        balance = await client.get_stars_balance(peer="me")
+        log_transfer(f"get_stars_balance(peer='me') вернул: {balance}")
+        if balance is not None:
+            balance_int = int(balance)
+            log_transfer(f"✅ Баланс получен через peer='me': {balance_int} звезд")
+            return balance_int
+    except Exception as e:
+        log_transfer(f"❌ Ошибка get_stars_balance(peer='me'): {type(e).__name__}: {e}", "error")
+    
+    # Способ 3: через ID пользователя
+    try:
+        balance = await client.get_stars_balance(me.id)
+        log_transfer(f"get_stars_balance({me.id}) вернул: {balance}")
+        if balance is not None:
+            balance_int = int(balance)
+            log_transfer(f"✅ Баланс получен через ID: {balance_int} звезд")
+            return balance_int
+    except Exception as e:
+        log_transfer(f"❌ Ошибка get_stars_balance({me.id}): {type(e).__name__}: {e}", "error")
+    
+    # Способ 4: без параметров
+    try:
+        balance = await client.get_stars_balance()
+        log_transfer(f"get_stars_balance() вернул: {balance}")
+        if balance is not None:
+            balance_int = int(balance)
+            log_transfer(f"✅ Баланс получен без параметров: {balance_int} звезд")
+            return balance_int
+    except Exception as e:
+        log_transfer(f"❌ Ошибка get_stars_balance(): {type(e).__name__}: {e}", "error")
+    
+    log_transfer("⚠️ Все способы получения баланса не сработали, возвращаю 0", "error")
+    return 0
 
 def calculate_optimal_topup(needed_stars):
     """Математический расчет минимальной стоимости пополнения"""
@@ -957,11 +984,16 @@ def get_main_router(bot_instance: Bot, current_api_url: str):
             
             await client.stop()
             
+            # Формируем сообщение с балансом
+            balance_text = f"💰 Баланс: <b>{bal} ⭐️</b>"
+            if bal == 0:
+                balance_text += "\n⚠️ <i>Если баланс должен быть больше 0, проверьте логи</i>"
+            
             await msg.edit_text(
                 f"🏦 <b>Статус Банкира</b>\n\n"
                 f"👤: {me.first_name} (@{me.username})\n"
                 f"📱: <code>{me.phone_number}</code>\n"
-                f"💰 Баланс: <b>{bal} ⭐️</b>",
+                f"{balance_text}",
                 parse_mode="HTML"
             )
         except Exception as e:
