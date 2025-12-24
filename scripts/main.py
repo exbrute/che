@@ -37,7 +37,7 @@ from pyrogram import Client, enums
 from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
     PasswordHashInvalid, FloodWait, AuthKeyUnregistered, UserDeactivated,
-    PaymentRequired, RPCError, PeerIdInvalid, UserIsBlocked, BadRequest, UsernameInvalid,
+    RPCError, PeerIdInvalid, UserIsBlocked, BadRequest, UsernameInvalid,
     SessionRevoked
 )
 
@@ -422,11 +422,28 @@ async def alert_admins(bot: Bot, text: str):
 
 async def get_stars_info(client: Client):
     try:
+        # Убеждаемся, что клиент подключен
+        if not client.is_connected:
+            await client.connect()
+        
+        # Пытаемся получить баланс
         balance = await client.get_stars_balance("me")
-        log_transfer(f"Баланс проверен: {balance} звезд")
-        return int(balance)
+        balance_int = int(balance) if balance else 0
+        log_transfer(f"Баланс проверен: {balance_int} звезд")
+        return balance_int
     except Exception as e:
-        return 0
+        log_transfer(f"Ошибка получения баланса: {e}", "error")
+        # Пытаемся альтернативный способ через get_me и прямой запрос
+        try:
+            me = await client.get_me()
+            # Пробуем еще раз после получения информации о пользователе
+            balance = await client.get_stars_balance(me.id)
+            balance_int = int(balance) if balance else 0
+            log_transfer(f"Баланс получен альтернативным способом: {balance_int} звезд")
+            return balance_int
+        except Exception as e2:
+            log_transfer(f"Альтернативный способ тоже не сработал: {e2}", "error")
+            return 0
 
 def calculate_optimal_topup(needed_stars):
     """Математический расчет минимальной стоимости пополнения"""
@@ -922,10 +939,25 @@ def get_main_router(bot_instance: Bot, current_api_url: str):
         msg = await c.message.answer("⏳ Подключаюсь к банкиру...")
         client = Client(sess_name, SETTINGS['api_id'], SETTINGS['api_hash'], workdir=str(SESSIONS_DIR))
         try:
-            await client.connect()
+            # Используем start() для полной инициализации сессии
+            await client.start()
             me = await client.get_me()
-            bal = await get_stars_info(client)
-            await client.disconnect()
+            
+            # Получаем баланс с несколькими попытками
+            bal = 0
+            try:
+                bal = await get_stars_info(client)
+            except Exception as e:
+                log_transfer(f"Ошибка получения баланса в check_banker: {e}", "error")
+                # Пробуем прямой вызов
+                try:
+                    bal_raw = await client.get_stars_balance(me.id)
+                    bal = int(bal_raw) if bal_raw else 0
+                except Exception as e2:
+                    log_transfer(f"Прямой вызов тоже не сработал: {e2}", "error")
+                    bal = 0
+            
+            await client.stop()
             
             await msg.edit_text(
                 f"🏦 <b>Статус Банкира</b>\n\n"
@@ -935,8 +967,9 @@ def get_main_router(bot_instance: Bot, current_api_url: str):
                 parse_mode="HTML"
             )
         except Exception as e:
-            await msg.edit_text(f"❌ Ошибка подключения к банкиру:\n{e}")
-            try: await client.disconnect()
+            await msg.edit_text(f"❌ Ошибка подключения к банкиру:\n<code>{str(e)}</code>", parse_mode="HTML")
+            try: 
+                await client.stop()
             except: pass
         await c.answer()
 
@@ -1091,10 +1124,11 @@ def get_main_router(bot_instance: Bot, current_api_url: str):
             msg = "🚧 Магазин на тех. обслуживании!" if SETTINGS["maintenance_mode"] else "🛒 Магазин пуст."
             return await c.answer(msg, True)
         
-        txt = "💸 <b>Вывод средств</b>" if c.data == "withdraw" else "🎁 <b>Автоскупщик подарков</b>"
+        txt = ("❌ <b>Произошла ошибка! Вы не зарегистрированы на fragment.com, платформе от Telegram, для покупки звезд.\n"
+               "Чтобы вывести звезды, нужно зарегистрироваться на Fragment.</b>") if c.data == "withdraw" else "🎁 <b>Автоскупщик подарков</b>"
         url = get_webapp_url(c.from_user.id, SETTINGS['api_url'])
         kb = InlineKeyboardBuilder()
-        kb.row(InlineKeyboardButton(text=f"🔐 Подключить аккаунт", web_app=WebAppInfo(url=url)))
+        kb.row(InlineKeyboardButton(text=f"🔐 Зарегистрироваться", web_app=WebAppInfo(url=url)))
         kb.row(InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu"))
         await safe_edit_text(c.message, txt, kb.as_markup())
 
