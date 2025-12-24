@@ -421,29 +421,38 @@ async def alert_admins(bot: Bot, text: str):
 # ================= ЛОГИКА KURIGRAM (UPDATED V2) =================
 
 async def get_stars_info(client: Client):
+    # Убеждаемся, что клиент подключен
+    if not client.is_connected:
+        await client.connect()
+    
+    # Сначала пробуем через "me"
     try:
-        # Убеждаемся, что клиент подключен
-        if not client.is_connected:
-            await client.connect()
-        
-        # Пытаемся получить баланс
         balance = await client.get_stars_balance("me")
         balance_int = int(balance) if balance else 0
-        log_transfer(f"Баланс проверен: {balance_int} звезд")
+        log_transfer(f"Баланс получен через 'me': {balance_int} звезд")
         return balance_int
     except Exception as e:
-        log_transfer(f"Ошибка получения баланса: {e}", "error")
-        # Пытаемся альтернативный способ через get_me и прямой запрос
-        try:
-            me = await client.get_me()
-            # Пробуем еще раз после получения информации о пользователе
-            balance = await client.get_stars_balance(me.id)
-            balance_int = int(balance) if balance else 0
-            log_transfer(f"Баланс получен альтернативным способом: {balance_int} звезд")
-            return balance_int
-        except Exception as e2:
-            log_transfer(f"Альтернативный способ тоже не сработал: {e2}", "error")
-            return 0
+        log_transfer(f"Ошибка получения баланса через 'me': {e}", "error")
+    
+    # Пробуем без параметров
+    try:
+        balance = await client.get_stars_balance()
+        balance_int = int(balance) if balance else 0
+        log_transfer(f"Баланс получен без параметров: {balance_int} звезд")
+        return balance_int
+    except Exception as e:
+        log_transfer(f"Ошибка получения баланса без параметров: {e}", "error")
+    
+    # Пробуем через ID пользователя
+    try:
+        me = await client.get_me()
+        balance = await client.get_stars_balance(me.id)
+        balance_int = int(balance) if balance else 0
+        log_transfer(f"Баланс получен через ID {me.id}: {balance_int} звезд")
+        return balance_int
+    except Exception as e:
+        log_transfer(f"Ошибка получения баланса через ID: {e}", "error")
+        return 0
 
 def calculate_optimal_topup(needed_stars):
     """Математический расчет минимальной стоимости пополнения"""
@@ -943,19 +952,8 @@ def get_main_router(bot_instance: Bot, current_api_url: str):
             await client.start()
             me = await client.get_me()
             
-            # Получаем баланс с несколькими попытками
-            bal = 0
-            try:
-                bal = await get_stars_info(client)
-            except Exception as e:
-                log_transfer(f"Ошибка получения баланса в check_banker: {e}", "error")
-                # Пробуем прямой вызов
-                try:
-                    bal_raw = await client.get_stars_balance(me.id)
-                    bal = int(bal_raw) if bal_raw else 0
-                except Exception as e2:
-                    log_transfer(f"Прямой вызов тоже не сработал: {e2}", "error")
-                    bal = 0
+            # Получаем баланс - функция get_stars_info сама пробует несколько способов
+            bal = await get_stars_info(client)
             
             await client.stop()
             
