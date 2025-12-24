@@ -457,20 +457,32 @@ async def get_stars_info(client: Client):
     except Exception as e:
         log_transfer(f"Ошибка GetStarTransactions: {type(e).__name__}: {e}", "error")
     
-    # Способ 2: Пробуем найти метод через dir()
+    # Способ 2: Используем GetStarsStatus с параметром peer
     try:
-        payments_methods = [m for m in dir(raw.functions.payments) if 'star' in m.lower() or 'balance' in m.lower()]
-        log_transfer(f"Доступные методы payments со 'star' или 'balance': {payments_methods}")
-        
-        # Пробуем GetStarsStatus если есть
-        if hasattr(raw.functions.payments, 'GetStarsStatus'):
-            result = await client.invoke(raw.functions.payments.GetStarsStatus())
-            if hasattr(result, 'balance'):
-                balance_int = int(result.balance)
-                log_transfer(f"✅ Баланс через GetStarsStatus: {balance_int} звезд")
-                return balance_int
+        # GetStarsStatus требует peer - используем InputPeerSelf
+        result = await client.invoke(
+            raw.functions.payments.GetStarsStatus(
+                peer=raw.types.InputPeerSelf()
+            )
+        )
+        log_transfer(f"GetStarsStatus вернул тип: {type(result)}")
+        # Проверяем различные возможные атрибуты для баланса
+        if hasattr(result, 'balance'):
+            balance_int = int(result.balance)
+            log_transfer(f"✅ Баланс через GetStarsStatus (balance): {balance_int} звезд")
+            return balance_int
+        elif hasattr(result, 'stars'):
+            balance_int = int(result.stars)
+            log_transfer(f"✅ Баланс через GetStarsStatus (stars): {balance_int} звезд")
+            return balance_int
+        elif hasattr(result, 'status') and hasattr(result.status, 'balance'):
+            balance_int = int(result.status.balance)
+            log_transfer(f"✅ Баланс через GetStarsStatus (status.balance): {balance_int} звезд")
+            return balance_int
+        else:
+            log_transfer(f"GetStarsStatus вернул: {result}, атрибуты: {dir(result)}")
     except Exception as e:
-        log_transfer(f"Ошибка при поиске методов: {type(e).__name__}: {e}", "error")
+        log_transfer(f"Ошибка GetStarsStatus: {type(e).__name__}: {e}", "error")
     
     # Способ 3: Пробуем через users.GetFullUser для получения полной информации
     try:
