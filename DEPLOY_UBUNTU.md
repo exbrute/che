@@ -105,10 +105,21 @@ source venv/bin/activate
 ### 3.3 Установка Python зависимостей
 ```bash
 pip install --upgrade pip
-pip install aiogram pyrogram aiohttp python-dotenv
+pip install aiogram aiohttp python-dotenv
+
+# Установка Pyrogram (обновленная версия для поддержки Stars)
+pip install --upgrade pyrogram
+
+# ИЛИ используйте Pyrofork (форк Pyrogram с поддержкой Stars)
+# pip install pyrofork
 
 # Опционально: установка TgCrypto для ускорения работы Pyrogram (рекомендуется)
 pip install TgCrypto
+```
+
+**Важно:** Для работы с балансом звезд нужна последняя версия Pyrogram (2.0.106+) или Pyrofork. Если баланс не отображается, обновите Pyrogram:
+```bash
+pip install --upgrade pyrogram
 ```
 
 **Примечание:** TgCrypto значительно ускоряет работу Pyrogram, но не является обязательным. Если установка TgCrypto не удается, бот будет работать, но медленнее.

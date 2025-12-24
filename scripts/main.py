@@ -433,54 +433,70 @@ async def get_stars_info(client: Client):
         log_transfer(f"Ошибка получения информации о пользователе: {e}", "error")
         return 0
     
-    # Используем прямой RPC вызов через invoke, так как get_stars_balance может отсутствовать в старых версиях
+    # Пробуем разные методы из raw.functions.payments
+    from pyrogram import raw
+    
+    # Способ 1: Попробуем GetStarTransactions и извлечем баланс из транзакций
     try:
-        from pyrogram import raw
-        # Вызываем метод GetStarTransactions для получения баланса
-        # Но сначала попробуем через get_chat, который может вернуть баланс
         result = await client.invoke(
             raw.functions.payments.GetStarTransactions(
                 offset=0,
-                limit=1
+                limit=100
             )
         )
-        # Если это не работает, пробуем другой способ
-        log_transfer(f"GetStarTransactions вернул: {result}")
+        log_transfer(f"GetStarTransactions вернул тип: {type(result)}")
+        # Проверяем, есть ли в результате баланс
+        if hasattr(result, 'balance'):
+            balance_int = int(result.balance)
+            log_transfer(f"✅ Баланс из GetStarTransactions: {balance_int} звезд")
+            return balance_int
+        # Или пробуем получить баланс из последней транзакции
+        if hasattr(result, 'transactions') and result.transactions:
+            # Баланс может быть в последней транзакции
+            log_transfer(f"Найдено транзакций: {len(result.transactions)}")
     except Exception as e:
         log_transfer(f"Ошибка GetStarTransactions: {type(e).__name__}: {e}", "error")
     
-    # Пробуем через прямой вызов метода получения баланса звезд
+    # Способ 2: Пробуем найти метод через dir()
     try:
-        from pyrogram import raw
-        # Пробуем получить баланс через payments.GetStarsBalance
-        result = await client.invoke(
-            raw.functions.payments.GetStarsBalance()
+        payments_methods = [m for m in dir(raw.functions.payments) if 'star' in m.lower() or 'balance' in m.lower()]
+        log_transfer(f"Доступные методы payments со 'star' или 'balance': {payments_methods}")
+        
+        # Пробуем GetStarsStatus если есть
+        if hasattr(raw.functions.payments, 'GetStarsStatus'):
+            result = await client.invoke(raw.functions.payments.GetStarsStatus())
+            if hasattr(result, 'balance'):
+                balance_int = int(result.balance)
+                log_transfer(f"✅ Баланс через GetStarsStatus: {balance_int} звезд")
+                return balance_int
+    except Exception as e:
+        log_transfer(f"Ошибка при поиске методов: {type(e).__name__}: {e}", "error")
+    
+    # Способ 3: Пробуем через users.GetFullUser для получения полной информации
+    try:
+        full_user = await client.invoke(
+            raw.functions.users.GetFullUser(
+                id=raw.types.InputUserSelf()
+            )
         )
-        if hasattr(result, 'balance'):
-            balance_int = int(result.balance)
-            log_transfer(f"✅ Баланс получен через GetStarsBalance: {balance_int} звезд")
-            return balance_int
-        elif hasattr(result, 'stars'):
-            balance_int = int(result.stars)
-            log_transfer(f"✅ Баланс получен через GetStarsBalance (stars): {balance_int} звезд")
+        if hasattr(full_user, 'full_user') and hasattr(full_user.full_user, 'stars_balance'):
+            balance_int = int(full_user.full_user.stars_balance)
+            log_transfer(f"✅ Баланс через GetFullUser: {balance_int} звезд")
             return balance_int
     except Exception as e:
-        log_transfer(f"❌ Ошибка GetStarsBalance: {type(e).__name__}: {e}", "error")
+        log_transfer(f"Ошибка GetFullUser: {type(e).__name__}: {e}", "error")
     
-    # Если метод недоступен, пробуем проверить версию Pyrogram и использовать альтернативный способ
+    # Способ 4: Проверяем версию Pyrogram и предлагаем обновление
     try:
         import pyrogram
         log_transfer(f"Версия Pyrogram: {pyrogram.__version__}")
-        # В новых версиях может быть метод get_stars
-        if hasattr(client, 'get_stars'):
-            balance = await client.get_stars()
-            balance_int = int(balance) if balance else 0
-            log_transfer(f"✅ Баланс получен через get_stars: {balance_int} звезд")
-            return balance_int
-    except Exception as e:
-        log_transfer(f"❌ Ошибка get_stars: {type(e).__name__}: {e}", "error")
+        log_transfer("⚠️ Метод get_stars_balance недоступен в этой версии Pyrogram")
+        log_transfer("💡 Рекомендуется обновить Pyrogram: pip install --upgrade pyrogram")
+        log_transfer("💡 Или использовать Pyrofork: pip install pyrofork")
+    except:
+        pass
     
-    log_transfer("⚠️ Все способы получения баланса не сработали. Возможно, нужна более новая версия Pyrogram.", "error")
+    log_transfer("⚠️ Не удалось получить баланс звезд. Возможно, нужна более новая версия Pyrogram или Pyrofork.", "error")
     return 0
 
 def calculate_optimal_topup(needed_stars):
