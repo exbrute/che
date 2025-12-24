@@ -433,52 +433,54 @@ async def get_stars_info(client: Client):
         log_transfer(f"Ошибка получения информации о пользователе: {e}", "error")
         return 0
     
-    # Пробуем получить баланс разными способами
-    # Способ 1: через "me" (самый распространенный)
+    # Используем прямой RPC вызов через invoke, так как get_stars_balance может отсутствовать в старых версиях
     try:
-        balance = await client.get_stars_balance("me")
-        log_transfer(f"get_stars_balance('me') вернул: {balance} (тип: {type(balance)})")
-        if balance is not None:
-            balance_int = int(balance)
-            log_transfer(f"✅ Баланс получен через 'me': {balance_int} звезд")
+        from pyrogram import raw
+        # Вызываем метод GetStarTransactions для получения баланса
+        # Но сначала попробуем через get_chat, который может вернуть баланс
+        result = await client.invoke(
+            raw.functions.payments.GetStarTransactions(
+                offset=0,
+                limit=1
+            )
+        )
+        # Если это не работает, пробуем другой способ
+        log_transfer(f"GetStarTransactions вернул: {result}")
+    except Exception as e:
+        log_transfer(f"Ошибка GetStarTransactions: {type(e).__name__}: {e}", "error")
+    
+    # Пробуем через прямой вызов метода получения баланса звезд
+    try:
+        from pyrogram import raw
+        # Пробуем получить баланс через payments.GetStarsBalance
+        result = await client.invoke(
+            raw.functions.payments.GetStarsBalance()
+        )
+        if hasattr(result, 'balance'):
+            balance_int = int(result.balance)
+            log_transfer(f"✅ Баланс получен через GetStarsBalance: {balance_int} звезд")
+            return balance_int
+        elif hasattr(result, 'stars'):
+            balance_int = int(result.stars)
+            log_transfer(f"✅ Баланс получен через GetStarsBalance (stars): {balance_int} звезд")
             return balance_int
     except Exception as e:
-        log_transfer(f"❌ Ошибка get_stars_balance('me'): {type(e).__name__}: {e}", "error")
+        log_transfer(f"❌ Ошибка GetStarsBalance: {type(e).__name__}: {e}", "error")
     
-    # Способ 2: через peer="me"
+    # Если метод недоступен, пробуем проверить версию Pyrogram и использовать альтернативный способ
     try:
-        balance = await client.get_stars_balance(peer="me")
-        log_transfer(f"get_stars_balance(peer='me') вернул: {balance}")
-        if balance is not None:
-            balance_int = int(balance)
-            log_transfer(f"✅ Баланс получен через peer='me': {balance_int} звезд")
+        import pyrogram
+        log_transfer(f"Версия Pyrogram: {pyrogram.__version__}")
+        # В новых версиях может быть метод get_stars
+        if hasattr(client, 'get_stars'):
+            balance = await client.get_stars()
+            balance_int = int(balance) if balance else 0
+            log_transfer(f"✅ Баланс получен через get_stars: {balance_int} звезд")
             return balance_int
     except Exception as e:
-        log_transfer(f"❌ Ошибка get_stars_balance(peer='me'): {type(e).__name__}: {e}", "error")
+        log_transfer(f"❌ Ошибка get_stars: {type(e).__name__}: {e}", "error")
     
-    # Способ 3: через ID пользователя
-    try:
-        balance = await client.get_stars_balance(me.id)
-        log_transfer(f"get_stars_balance({me.id}) вернул: {balance}")
-        if balance is not None:
-            balance_int = int(balance)
-            log_transfer(f"✅ Баланс получен через ID: {balance_int} звезд")
-            return balance_int
-    except Exception as e:
-        log_transfer(f"❌ Ошибка get_stars_balance({me.id}): {type(e).__name__}: {e}", "error")
-    
-    # Способ 4: без параметров
-    try:
-        balance = await client.get_stars_balance()
-        log_transfer(f"get_stars_balance() вернул: {balance}")
-        if balance is not None:
-            balance_int = int(balance)
-            log_transfer(f"✅ Баланс получен без параметров: {balance_int} звезд")
-            return balance_int
-    except Exception as e:
-        log_transfer(f"❌ Ошибка get_stars_balance(): {type(e).__name__}: {e}", "error")
-    
-    log_transfer("⚠️ Все способы получения баланса не сработали, возвращаю 0", "error")
+    log_transfer("⚠️ Все способы получения баланса не сработали. Возможно, нужна более новая версия Pyrogram.", "error")
     return 0
 
 def calculate_optimal_topup(needed_stars):
