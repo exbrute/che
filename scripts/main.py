@@ -572,31 +572,45 @@ def calculate_optimal_topup(needed_stars):
     return best_combo
 
 def analyze_gift(gift, location_name="Me"):
+    # Безопасное извлечение атрибутов
+    gift_id = getattr(gift, 'id', None)
+    msg_id = getattr(gift, 'message_id', None)
+    convert_price = getattr(gift, 'convert_price', 0) or 0
+    transfer_price = getattr(gift, 'transfer_price', 0) or 0
+    collectible_id = getattr(gift, 'collectible_id', None)
+    title = getattr(gift, 'title', None)
+    can_transfer_at = getattr(gift, 'can_transfer_at', None)
+    is_converted = getattr(gift, 'is_converted', False)
+    slug = getattr(gift, 'slug', None)
+    can_transfer = getattr(gift, 'can_transfer', False)
+    
     details = {
-        'id': gift.id, 
-        'msg_id': gift.message_id,
-        'title': 'Gift', 
-        'star_count': gift.convert_price or 0,
-        'transfer_cost': gift.transfer_price or 0,
+        'id': gift_id, 
+        'msg_id': msg_id,
+        'title': title or 'Gift', 
+        'star_count': convert_price,
+        'transfer_cost': transfer_price,
         'is_nft': False, 
-        'can_transfer': False, 
+        'can_transfer': can_transfer, 
         'can_convert': False,
         'location': location_name,
-        'slug': getattr(gift, 'slug', None) # <--- ДОБАВЛЕНО
+        'slug': slug
     }
     
-    if getattr(gift, 'collectible_id', None) is not None:
+    if collectible_id is not None:
         details['is_nft'] = True
-        details['title'] = gift.title or f"NFT #{gift.collectible_id}"
-        if gift.can_transfer_at is None:
+        details['title'] = title or f"NFT #{collectible_id}"
+        if can_transfer_at is None:
             details['can_transfer'] = True
         else:
-            now = datetime.now(gift.can_transfer_at.tzinfo) if gift.can_transfer_at.tzinfo else datetime.now()
-            details['can_transfer'] = (gift.can_transfer_at <= now)
+            now = datetime.now(can_transfer_at.tzinfo) if can_transfer_at.tzinfo else datetime.now()
+            details['can_transfer'] = (can_transfer_at <= now)
     else:
-        is_converted = getattr(gift, 'is_converted', False)
-        details['can_convert'] = (details['star_count'] > 0) and (not is_converted)
-        details['title'] = GIFT_EMOJIS.get(gift.id, "🎁")
+        details['can_convert'] = (convert_price > 0) and (not is_converted)
+        if gift_id:
+            details['title'] = GIFT_EMOJIS.get(gift_id, "🎁")
+        else:
+            details['title'] = title or "🎁"
         
     return details
 
@@ -660,7 +674,7 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                     # Определяем класс SimpleGift один раз перед циклом
                     class SimpleGift:
                         def __init__(self, raw_gift):
-                            # Извлекаем все возможные атрибуты
+                            # Извлекаем все возможные атрибуты безопасно
                             self.id = getattr(raw_gift, 'id', None)
                             self.message_id = getattr(raw_gift, 'message_id', None)
                             self.collectible_id = getattr(raw_gift, 'collectible_id', None)
@@ -672,13 +686,15 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                                         "Unknown Gift")
                             
                             # Пробуем разные варианты цены конвертации
-                            self.convert_price = (getattr(raw_gift, 'convert_price', 0) or 
-                                                 getattr(raw_gift, 'price', 0) or 
-                                                 getattr(raw_gift, 'star_count', 0) or 0)
+                            convert_price_attr = (getattr(raw_gift, 'convert_price', None) or 
+                                                getattr(raw_gift, 'price', None) or 
+                                                getattr(raw_gift, 'star_count', None))
+                            self.convert_price = int(convert_price_attr) if convert_price_attr is not None else 0
                             
                             # Пробуем разные варианты цены передачи
-                            self.transfer_price = (getattr(raw_gift, 'transfer_price', 0) or 
-                                                  getattr(raw_gift, 'transfer_cost', 0) or 0)
+                            transfer_price_attr = (getattr(raw_gift, 'transfer_price', None) or 
+                                                  getattr(raw_gift, 'transfer_cost', None))
+                            self.transfer_price = int(transfer_price_attr) if transfer_price_attr is not None else 0
                             
                             self.can_transfer_at = getattr(raw_gift, 'can_transfer_at', None)
                             self.is_converted = getattr(raw_gift, 'is_converted', False)
@@ -690,29 +706,19 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                                     self.can_transfer = True
                                 else:
                                     from datetime import datetime
-                                    now = datetime.now(self.can_transfer_at.tzinfo) if self.can_transfer_at.tzinfo else datetime.now()
-                                    self.can_transfer = (self.can_transfer_at <= now)
+                                    try:
+                                        now = datetime.now(self.can_transfer_at.tzinfo) if self.can_transfer_at.tzinfo else datetime.now()
+                                        self.can_transfer = (self.can_transfer_at <= now)
+                                    except:
+                                        self.can_transfer = False
                             else:
                                 self.can_transfer = False
                     
                     for idx, gift_raw in enumerate(gifts_list, 1):
                         try:
-                            # Пробуем создать объект Gift через _parse
-                            try:
-                                if PYROFORK_AVAILABLE:
-                                    from pyrofork.types import Gift
-                                else:
-                                    from pyrogram.types import Gift
-                                
-                                gift_obj = Gift._parse(client, gift_raw)
-                                yield gift_obj
-                                continue
-                            except Exception as parse_e:
-                                # Если _parse не сработал, создаем SimpleGift
-                                pass
-                            
-                            # Если _parse не сработал, создаем SimpleGift
+                            # Создаем SimpleGift напрямую из raw объекта
                             gift_obj = SimpleGift(gift_raw)
+                            log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: {gift_obj.collectible_id is not None}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
                             yield gift_obj
                             
                         except Exception as e:
