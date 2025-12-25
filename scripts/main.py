@@ -1089,8 +1089,9 @@ async def convert_gift_task(client: Client, gift_details):
                             return True
                         except Exception as e4:
                             log_transfer(f"❌ Вариант с msg_id тоже не сработал: {e4}", "error")
+                    # Если все варианты не сработали, поднимаем исключение
                     raise
-        
+
     except BadRequest as e:
         e_str = str(e)
         if "STARGIFT_CONVERT_TOO_OLD" in e_str or "TOO_OLD" in e_str:
