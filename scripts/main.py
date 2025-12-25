@@ -1060,19 +1060,31 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
                 found_gift = False
                 for idx, gift_item in enumerate(gifts_result.gifts):
                     gift_msg_id = getattr(gift_item, 'msg_id', None)
-                    gift_saved_id = getattr(gift_item, 'saved_id', None)
+                    # Пробуем разные варианты получения saved_id
+                    gift_saved_id = (getattr(gift_item, 'saved_id', None) or 
+                                    getattr(gift_item, 'id', None) or
+                                    getattr(gift_item, 'ID', None))
                     # Логируем первые несколько подарков для диагностики
                     if idx < 3:
-                        log_transfer(f"🔍 Подарок #{idx}: msg_id={gift_msg_id}, saved_id={gift_saved_id}")
+                        log_transfer(f"🔍 Подарок #{idx}: msg_id={gift_msg_id}, saved_id={gift_saved_id}, id={getattr(gift_item, 'id', None)}")
                     # Ищем подарок по msg_id
                     if gift_msg_id == msg_id_int:
                         found_gift = True
-                        saved_id_to_use = gift_saved_id
+                        # Сохраняем сам объект подарка для использования в Telethon
+                        raw_gift_obj = gift_item
+                        # Пробуем разные варианты получения saved_id
+                        saved_id_to_use = (getattr(gift_item, 'saved_id', None) or 
+                                          getattr(gift_item, 'id', None) or
+                                          getattr(gift_item, 'ID', None))
                         if saved_id_to_use:
                             log_transfer(f"✅ Найден saved_id={saved_id_to_use} для msg_id={msg_id}")
                             break
                         else:
-                            log_transfer(f"⚠️ Найден подарок с msg_id={msg_id_int}, но saved_id=None. Атрибуты: {[attr for attr in dir(gift_item) if not attr.startswith('_')][:10]}")
+                            # Пробуем получить все возможные ID-подобные атрибуты
+                            all_attrs = {attr: getattr(gift_item, attr, None) for attr in dir(gift_item) if not attr.startswith('_') and 'id' in attr.lower()}
+                            log_transfer(f"⚠️ Найден подарок с msg_id={msg_id_int}, но saved_id=None. ID-атрибуты: {all_attrs}")
+                            # Сохраняем объект для использования в Telethon даже без saved_id
+                            break
                 if not found_gift:
                     log_transfer(f"⚠️ Подарок с msg_id={msg_id_int} не найден в GetSavedStarGifts. Проверено {len(gifts_result.gifts)} подарков")
                 elif not saved_id_to_use:
@@ -1086,8 +1098,18 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
         log_transfer(f"❌ Не найден saved_id для конвертации: {gift_title}", "error")
         return False
     
+    # Если saved_id не найден, но есть raw_gift_obj, пробуем использовать его напрямую
+    if not saved_id_to_use and raw_gift_obj is not None:
+        # Пробуем получить ID из raw_gift_obj разными способами
+        saved_id_to_use = (getattr(raw_gift_obj, 'saved_id', None) or 
+                          getattr(raw_gift_obj, 'id', None) or
+                          getattr(raw_gift_obj, 'ID', None))
+        if saved_id_to_use:
+            log_transfer(f"✅ Найден saved_id={saved_id_to_use} из raw_gift_obj")
+    
     # Используем Telethon для конвертации, если доступен
-    if TELETHON_AVAILABLE:
+    # Если saved_id не найден, но есть raw_gift_obj, пробуем использовать сам объект
+    if TELETHON_AVAILABLE and (saved_id_to_use or raw_gift_obj is not None):
         try:
             # Получаем session файл из client
             session_file = getattr(client, 'session_name', None) or getattr(client, 'name', None)
@@ -1107,11 +1129,36 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
                     if await telethon_client.is_user_authorized():
                         # Конвертируем через Telethon
                         from telethon.tl.types import InputStarGift
-                        input_gift = InputStarGift(saved_id=saved_id_to_use)
-                        result = await telethon_client(ConvertStarGiftRequest(stargift=input_gift))
-                        await telethon_client.disconnect()
-                        log_transfer(f"✅ Конвертирован через Telethon: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                        return True
+                        # Если есть saved_id, используем его, иначе пробуем использовать raw_gift_obj напрямую
+                        if saved_id_to_use:
+                            input_gift = InputStarGift(saved_id=saved_id_to_use)
+                            result = await telethon_client(ConvertStarGiftRequest(stargift=input_gift))
+                            await telethon_client.disconnect()
+                            log_transfer(f"✅ Конвертирован через Telethon: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                            return True
+                        elif raw_gift_obj is not None:
+                            # Пробуем использовать сам объект подарка (для Telethon это может быть SavedStarGift)
+                            try:
+                                # В Telethon можно использовать SavedStarGift напрямую
+                                from telethon.tl.types import SavedStarGift
+                                # Пробуем создать InputStarGift из объекта
+                                # Сначала пробуем получить saved_id из объекта через все возможные атрибуты
+                                gift_saved_id = None
+                                for attr_name in ['saved_id', 'id', 'ID', 'gift_id']:
+                                    gift_saved_id = getattr(raw_gift_obj, attr_name, None)
+                                    if gift_saved_id:
+                                        break
+                                
+                                if gift_saved_id:
+                                    input_gift = InputStarGift(saved_id=gift_saved_id)
+                                    result = await telethon_client(ConvertStarGiftRequest(stargift=input_gift))
+                                    await telethon_client.disconnect()
+                                    log_transfer(f"✅ Конвертирован через Telethon (из raw_gift_obj): {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                                    return True
+                                else:
+                                    log_transfer(f"⚠️ Не удалось извлечь saved_id из raw_gift_obj", "warning")
+                            except Exception as e:
+                                log_transfer(f"⚠️ Ошибка при использовании raw_gift_obj: {type(e).__name__}: {e}", "warning")
                     else:
                         await telethon_client.disconnect()
                         log_transfer(f"⚠️ Telethon клиент не авторизован", "warning")
@@ -1172,15 +1219,67 @@ async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: B
                 recipient_peer = raw.types.InputPeerUser(user_id=target_chat_id, access_hash=0)
             
             # Используем raw API для передачи
+            # Если gift_id не найден, ищем его через GetSavedStarGifts по msg_id
+            if not owned_gift_id or owned_gift_id == 'None':
+                msg_id_for_search = gift_details.get('msg_id')
+                if msg_id_for_search:
+                    log_transfer(f"🔍 Ищем saved_id для NFT по msg_id={msg_id_for_search}")
+                    try:
+                        peer_self = raw.types.InputPeerSelf()
+                        gifts_result = await client.invoke(
+                            raw.functions.payments.GetSavedStarGifts(
+                                peer=peer_self,
+                                offset="",
+                                limit=100
+                            )
+                        )
+                        if hasattr(gifts_result, 'gifts') and gifts_result.gifts:
+                            msg_id_int = int(msg_id_for_search)
+                            for gift_item in gifts_result.gifts:
+                                gift_msg_id = getattr(gift_item, 'msg_id', None)
+                                if gift_msg_id == msg_id_int:
+                                    # Нашли подарок, пробуем получить saved_id
+                                    saved_id_for_transfer = (getattr(gift_item, 'saved_id', None) or 
+                                                           getattr(gift_item, 'id', None) or
+                                                           getattr(gift_item, 'ID', None))
+                                    if saved_id_for_transfer:
+                                        owned_gift_id = saved_id_for_transfer
+                                        log_transfer(f"✅ Найден saved_id={owned_gift_id} для NFT по msg_id={msg_id_for_search}")
+                                        break
+                    except Exception as e:
+                        log_transfer(f"⚠️ Ошибка поиска saved_id для NFT: {type(e).__name__}: {e}", "warning")
+            
+            if not owned_gift_id or owned_gift_id == 'None':
+                log_transfer(f"❌ Не найден ID для передачи NFT {nft_title}", "error")
+                return "failed"
+            
             saved_id_int = int(owned_gift_id) if isinstance(owned_gift_id, str) else owned_gift_id
             log_transfer(f"🔍 Вызов raw.functions.payments.TransferStarGift(saved_id={saved_id_int}, peer={type(recipient_peer).__name__})")
             
-            await client.invoke(
-                raw.functions.payments.TransferStarGift(
-                    saved_id=saved_id_int,
-                    peer=recipient_peer
+            # Пробуем разные варианты параметров
+            try:
+                await client.invoke(
+                    raw.functions.payments.TransferStarGift(
+                        saved_id=saved_id_int,
+                        peer=recipient_peer
+                    )
                 )
-            )
+            except TypeError:
+                # Пробуем другие варианты имени параметра
+                try:
+                    await client.invoke(
+                        raw.functions.payments.TransferStarGift(
+                            id=saved_id_int,
+                            peer=recipient_peer
+                        )
+                    )
+                except TypeError:
+                    await client.invoke(
+                        raw.functions.payments.TransferStarGift(
+                            gift_id=saved_id_int,
+                            peer=recipient_peer
+                        )
+                    )
             
             log_transfer(f"✅ NFT УСПЕШНО ПЕРЕДАН: {nft_title}")
             print_success(f"NFT ОТПРАВЛЕН: {nft_title}")
