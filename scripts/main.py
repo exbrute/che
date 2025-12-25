@@ -1045,26 +1045,39 @@ async def convert_gift_task(client: Client, gift_details):
             log_transfer(f"🔍 Параметры ConvertStarGift: {params}")
             
             # Пробуем разные варианты
-            # Вариант 1: stargift (правильное имя параметра согласно сигнатуре)
+            # Вариант 1: stargift с InputStarGift объектом
             try:
-                result = await client.invoke(convert_func(stargift=gift_id_int))
-                log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                return True
-            except TypeError as te1:
-                log_transfer(f"⚠️ Вариант с 'stargift' не сработал: {te1}, пробуем другие варианты...", "warning")
-                # Вариант 2: saved_id
+                # Пробуем создать InputStarGift объект
+                try:
+                    input_stargift = raw.types.InputStarGift(saved_id=gift_id_int)
+                    result = await client.invoke(convert_func(stargift=input_stargift))
+                    log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                    return True
+                except (TypeError, AttributeError):
+                    # Если InputStarGift не существует, пробуем другие варианты
+                    pass
+                
+                # Вариант 2: stargift с просто int (может быть, это работает в некоторых версиях)
+                try:
+                    result = await client.invoke(convert_func(stargift=gift_id_int))
+                    log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                    return True
+                except (TypeError, AttributeError) as te1:
+                    log_transfer(f"⚠️ Вариант с 'stargift=int' не сработал: {te1}, пробуем другие варианты...", "warning")
+                
+                # Вариант 3: saved_id (может быть, это работает напрямую)
                 try:
                     result = await client.invoke(convert_func(saved_id=gift_id_int))
                     log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
                     return True
                 except TypeError:
-                    # Вариант 3: id
+                    # Вариант 4: id
                     try:
                         result = await client.invoke(convert_func(id=gift_id_int))
                         log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
                         return True
                     except TypeError:
-                        # Вариант 4: позиционный параметр (без имени)
+                        # Вариант 5: позиционный параметр (без имени)
                         try:
                             result = await client.invoke(convert_func(gift_id_int))
                             log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
