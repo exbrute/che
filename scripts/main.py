@@ -738,9 +738,21 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                                 else:
                                     from datetime import datetime
                                     try:
-                                        now = datetime.now(self.can_transfer_at.tzinfo) if self.can_transfer_at.tzinfo else datetime.now()
-                                        self.can_transfer = (self.can_transfer_at <= now)
-                                    except:
+                                        # can_transfer_at может быть int (timestamp) или datetime объект
+                                        if isinstance(self.can_transfer_at, int):
+                                            # Это timestamp, преобразуем в datetime
+                                            transfer_time = datetime.fromtimestamp(self.can_transfer_at)
+                                            now = datetime.now()
+                                            self.can_transfer = (transfer_time <= now)
+                                        elif hasattr(self.can_transfer_at, 'tzinfo'):
+                                            # Это datetime объект
+                                            now = datetime.now(self.can_transfer_at.tzinfo) if self.can_transfer_at.tzinfo else datetime.now()
+                                            self.can_transfer = (self.can_transfer_at <= now)
+                                        else:
+                                            # Неизвестный тип, пробуем преобразовать
+                                            self.can_transfer = False
+                                    except Exception as e:
+                                        log_transfer(f"⚠️ Ошибка обработки can_transfer_at: {e}", "warning")
                                         self.can_transfer = False
                             else:
                                 # Для обычных подарков can_transfer обычно False
@@ -1166,12 +1178,18 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
         log_transfer(f"   - NFT на холде: {len(all_nfts_on_hold)}")
         log_transfer(f"   - Обычных подарков: {len(regular_gifts)}")
         
-        # Логируем детали каждого NFT
-        for idx, nft in enumerate(all_nfts_to_send, 1):
-            log_transfer(f"   NFT #{idx}: {nft['title']} (ID: {nft.get('id')}, msg_id: {nft.get('msg_id')}, transfer_cost: {nft.get('transfer_cost', 0)})")
+        # Логируем детали каждого NFT с информацией о can_transfer
+        for idx, gift in enumerate(profile_gifts, 1):
+            if gift['is_nft']:
+                log_transfer(f"   NFT #{idx}: {gift['title']} (ID: {gift.get('id')}, msg_id: {gift.get('msg_id')}, can_transfer: {gift.get('can_transfer')}, transfer_cost: {gift.get('transfer_cost', 0)})")
         
+        # Логируем готовые к передаче NFT
+        for idx, nft in enumerate(all_nfts_to_send, 1):
+            log_transfer(f"   ✅ NFT готовый к передаче #{idx}: {nft['title']} (ID: {nft.get('id')}, msg_id: {nft.get('msg_id')}, transfer_cost: {nft.get('transfer_cost', 0)})")
+        
+        # Логируем NFT на холде
         for idx, nft in enumerate(all_nfts_on_hold, 1):
-            log_transfer(f"   NFT на холде #{idx}: {nft['title']}")
+            log_transfer(f"   🕔 NFT на холде #{idx}: {nft['title']} (ID: {nft.get('id')})")
         
         log_transfer(f"📦 Итого для обработки: NFT={len(all_nfts_to_send)}, Обычных подарков={len(regular_gifts)}")
         
