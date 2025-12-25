@@ -819,15 +819,23 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                             # Создаем SimpleGift напрямую из raw объекта
                             gift_obj = SimpleGift(gift_raw)
                             
-                            # Дополнительная проверка: если есть convert_stars > 0, но нет collection_id - это обычный подарок
-                            # У NFT есть collection_id, у обычных подарков его нет
-                            if gift_obj.collectible_id is None and gift_obj.convert_price > 0:
-                                # Это обычный подарок, не NFT - убеждаемся, что collectible_id = None
+                            # КРИТИЧЕСКАЯ ПРОВЕРКА: определяем тип подарка
+                            # У NFT есть collection_id в raw_gift, у обычных подарков его НЕТ
+                            raw_collection_id = getattr(gift_raw, 'collection_id', None)
+                            
+                            # Логируем для диагностики
+                            log_transfer(f"🔍 Подарок #{idx}: collection_id={raw_collection_id}, convert_price={gift_obj.convert_price}, can_transfer={gift_obj.can_transfer}")
+                            
+                            # Если collection_id = None, это ОБЫЧНЫЙ подарок (не NFT)
+                            if raw_collection_id is None:
+                                # Это обычный подарок - принудительно устанавливаем значения
                                 gift_obj.collectible_id = None
                                 gift_obj.can_transfer = False  # Обычные подарки нельзя передавать
-                                log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (ОБЫЧНЫЙ, Конверт: {gift_obj.convert_price} зв, NFT: False)")
+                                log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (ОБЫЧНЫЙ, Конверт: {gift_obj.convert_price} зв, NFT: False, Трансфер: False)")
                             else:
-                                log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: {gift_obj.collectible_id is not None}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
+                                # Это NFT - collection_id есть
+                                gift_obj.collectible_id = raw_collection_id
+                                log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: True, collection_id={raw_collection_id}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
                             
                             yield gift_obj
                             
@@ -932,6 +940,9 @@ async def convert_gift_task(client: Client, gift_details):
     msg_id = gift_details.get('msg_id')
     saved_id = gift_details.get('id')
     
+    # Логируем все доступные ID для диагностики
+    log_transfer(f"🔄 Попытка конвертации: {gift_title} (saved_id={saved_id}, msg_id={msg_id})")
+    
     if not msg_id and not saved_id:
         log_transfer(f"⚠️ Нет ID подарка для конвертации: {gift_title}", "warning")
         return False
@@ -945,7 +956,11 @@ async def convert_gift_task(client: Client, gift_details):
         # Используем saved_id если есть, иначе msg_id
         gift_id_to_convert = saved_id if saved_id else msg_id
         
-        log_transfer(f"🔄 Конвертация подарка: {gift_title} (ID: {gift_id_to_convert})")
+        if not gift_id_to_convert:
+            log_transfer(f"❌ Нет валидного ID для конвертации: {gift_title}", "error")
+            return False
+        
+        log_transfer(f"🔄 Конвертация подарка: {gift_title} (saved_id={gift_id_to_convert})")
         
         # Используем raw API для конвертации
         result = await client.invoke(
