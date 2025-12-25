@@ -703,8 +703,9 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                     # Определяем класс SimpleGift один раз перед циклом
                     class SimpleGift:
                         def __init__(self, raw_gift):
-                            # Извлекаем ID подарка (saved_id - это основной ID)
+                            # Извлекаем ID подарка (saved_id - это основной ID для конвертации)
                             self.id = getattr(raw_gift, 'saved_id', None) or getattr(raw_gift, 'id', None)
+                            self.saved_id = getattr(raw_gift, 'saved_id', None)  # Сохраняем saved_id отдельно
                             self.message_id = getattr(raw_gift, 'msg_id', None) or getattr(raw_gift, 'message_id', None)
                             
                             # Получаем информацию о подарке из объекта gift
@@ -1034,9 +1035,11 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
     saved_id_to_use = saved_id
     if raw_gift_obj is not None:
         saved_id_to_use = getattr(raw_gift_obj, 'saved_id', None) or saved_id
+        log_transfer(f"🔍 Из raw_gift_obj получен saved_id={saved_id_to_use}")
     
     # Если saved_id нет, ищем его через Pyrogram API по msg_id
     if not saved_id_to_use and msg_id:
+        log_transfer(f"🔍 Ищем saved_id по msg_id={msg_id} в GetSavedStarGifts...")
         try:
             if PYROFORK_AVAILABLE:
                 from pyrofork import raw
@@ -1489,9 +1492,14 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
                     gift_info = analyze_gift(g)
                     # Получаем raw объект из gift_info или из самого объекта g
                     raw_gift_obj = gift_info.get('_raw_gift') or getattr(g, '_raw_gift', None)
+                    # Если saved_id не в gift_info, получаем его из SimpleGift
+                    if not gift_info.get('id') and hasattr(g, 'saved_id'):
+                        gift_info['id'] = g.saved_id
+                    elif not gift_info.get('id') and hasattr(g, 'id'):
+                        gift_info['id'] = g.id
+                    log_transfer(f"♻️ Найден подарок для конвертации: {gift_info['title']} (saved_id={gift_info.get('id')}, msg_id={gift_info.get('msg_id')}, raw_gift_obj={raw_gift_obj is not None})")
                     convert_tasks.append(convert_gift_task(client, gift_info, raw_gift_obj))
                     total_convertable_stars += convert_price
-                    log_transfer(f"♻️ Найден подарок для конвертации: {gift_info['title']} (+{convert_price} зв)")
             
             # Если есть подарки для конвертации - конвертируем их
             if convert_tasks:
