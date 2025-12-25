@@ -1038,48 +1038,48 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
         # Используем raw API для конвертации
         convert_func = raw.functions.payments.ConvertStarGift
         
-        # КРИТИЧЕСКИЙ FIX: используем сам объект подарка, если он доступен
+        # КРИТИЧЕСКИЙ FIX: используем сам объект подарка из GetSavedStarGifts
+        # SavedStarGift требует date и gift, которые уже есть в объекте из GetSavedStarGifts
+        gift_id_int = int(gift_id_to_convert) if gift_id_to_convert else 0
+        
+        # Сначала пробуем использовать raw_gift_obj, если он доступен
         if raw_gift_obj is not None:
             try:
-                # Используем сам объект подарка напрямую (это объект из GetSavedStarGifts)
+                # Используем сам объект подарка напрямую (это объект SavedStarGift из GetSavedStarGifts)
                 result = await client.invoke(convert_func(stargift=raw_gift_obj))
                 log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
                 return True
             except Exception as e:
-                log_transfer(f"⚠️ Вариант с raw_gift_obj не сработал: {type(e).__name__}: {e}, пробуем другие варианты...", "warning")
+                log_transfer(f"⚠️ Вариант с raw_gift_obj не сработал: {type(e).__name__}: {e}", "warning")
         
-        # Если raw_gift_obj не доступен, пробуем создать объект из saved_id
-        gift_id_int = int(gift_id_to_convert) if gift_id_to_convert else 0
-        
-        # Пробуем разные варианты создания объекта
-        # Вариант 1: SavedStarGift (наиболее вероятный тип)
+        # Если raw_gift_obj не доступен или не сработал, получаем его заново из GetSavedStarGifts
         try:
-            saved_stargift = raw.types.SavedStarGift(saved_id=gift_id_int)
-            result = await client.invoke(convert_func(stargift=saved_stargift))
-            log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-            return True
-        except (TypeError, AttributeError) as e1:
-            log_transfer(f"⚠️ Вариант с SavedStarGift не сработал: {e1}, пробуем InputStarGift...", "warning")
-            
-            # Вариант 2: InputStarGift
-            try:
-                input_stargift = raw.types.InputStarGift(saved_id=gift_id_int)
-                result = await client.invoke(convert_func(stargift=input_stargift))
-                log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                return True
-            except (TypeError, AttributeError) as e2:
-                log_transfer(f"⚠️ Вариант с InputStarGift не сработал: {e2}, пробуем StarGift...", "warning")
-                
-                # Вариант 3: StarGift (просто StarGift)
-                try:
-                    stargift_obj = raw.types.StarGift(saved_id=gift_id_int)
-                    result = await client.invoke(convert_func(stargift=stargift_obj))
-                    log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                    return True
-                except (TypeError, AttributeError) as e3:
-                    # Если все варианты не сработали, логируем ошибку
-                    log_transfer(f"❌ Все варианты создания объекта не сработали для {gift_title}. Ошибки: SavedStarGift={e1}, InputStarGift={e2}, StarGift={e3}", "error")
-                    raise
+            peer = raw.types.InputPeerSelf()
+            gifts_result = await client.invoke(
+                raw.functions.payments.GetSavedStarGifts(
+                    peer=peer,
+                    offset="",
+                    limit=100
+                )
+            )
+            if hasattr(gifts_result, 'gifts') and gifts_result.gifts:
+                for gift_item in gifts_result.gifts:
+                    gift_saved_id = getattr(gift_item, 'saved_id', None)
+                    gift_msg_id = getattr(gift_item, 'msg_id', None)
+                    # Ищем подарок по saved_id или msg_id
+                    if (gift_saved_id == gift_id_int or 
+                        gift_msg_id == gift_id_int or
+                        (msg_id and gift_msg_id == int(msg_id))):
+                        # Нашли нужный подарок, используем его объект напрямую
+                        result = await client.invoke(convert_func(stargift=gift_item))
+                        log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                        return True
+        except Exception as e:
+            log_transfer(f"⚠️ Не удалось найти подарок в GetSavedStarGifts: {type(e).__name__}: {e}", "warning")
+        
+        # Если все варианты не сработали
+        log_transfer(f"❌ Не удалось конвертировать {gift_title}: не найден объект подарка", "error")
+        raise Exception(f"Не удалось найти объект подарка для конвертации {gift_title}")
 
     except BadRequest as e:
         e_str = str(e)
