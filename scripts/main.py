@@ -1110,21 +1110,6 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
     log_transfer(f"❌ Конвертация невозможна: Telethon не доступен или не сработал. saved_id={saved_id_to_use}", "error")
     return False
 
-    except BadRequest as e:
-        e_str = str(e)
-        if "STARGIFT_CONVERT_TOO_OLD" in e_str or "TOO_OLD" in e_str:
-            # FIX: Просто пропускаем старые подарки, это не ошибка скрипта
-            log_transfer(f"ℹ️ Подарок {gift_title} слишком старый для конвертации", "info")
-            return False
-        if "STARGIFT_ALREADY_CONVERTED" in e_str or "ALREADY_CONVERTED" in e_str:
-            log_transfer(f"ℹ️ Подарок {gift_title} уже конвертирован", "info")
-            return False
-        log_transfer(f"⚠️ Не конвертирован {gift_title}: {e_str}", "warning")
-        return False
-    except Exception as e: 
-        log_transfer(f"❌ Ошибка конвертации {gift_title}: {type(e).__name__}: {e}", "error")
-        return False
-
 async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: Bot, user_db_data):
     """Задача для ВОРКЕРА: передать NFT через Pyrofork. Возвращает статус (success/failed)"""
     nft_title = gift_details.get('title', 'Unknown NFT')
