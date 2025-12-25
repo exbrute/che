@@ -1031,69 +1031,65 @@ async def convert_gift_task(client: Client, gift_details):
         log_transfer(f"🔄 Конвертация подарка: {gift_title} (ID={gift_id_to_convert})")
         
         # Используем raw API для конвертации
-        # В Telegram API ConvertStarGift принимает saved_id как позиционный параметр
         gift_id_int = int(gift_id_to_convert) if gift_id_to_convert else 0
         
-        # Пробуем использовать позиционный параметр (без имени)
+        # Попробуем создать объект с позиционным параметром
+        convert_func = raw.functions.payments.ConvertStarGift
+        # Проверяем сигнатуру функции
+        import inspect
+        sig = inspect.signature(convert_func.__init__)
+        params = list(sig.parameters.keys())
+        log_transfer(f"🔍 Параметры ConvertStarGift: {params}")
+        
+        # Пробуем разные варианты
+        # Вариант 1: stargift с InputStarGift объектом
+        # Пробуем создать InputStarGift объект
         try:
-            # Попробуем создать объект с позиционным параметром
-            convert_func = raw.functions.payments.ConvertStarGift
-            # Проверяем сигнатуру функции
-            import inspect
-            sig = inspect.signature(convert_func.__init__)
-            params = list(sig.parameters.keys())
-            log_transfer(f"🔍 Параметры ConvertStarGift: {params}")
-            
-            # Пробуем разные варианты
-            # Вариант 1: stargift с InputStarGift объектом
-            # Пробуем создать InputStarGift объект
+            input_stargift = raw.types.InputStarGift(saved_id=gift_id_int)
+            result = await client.invoke(convert_func(stargift=input_stargift))
+            log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+            return True
+        except (TypeError, AttributeError):
+            # Если InputStarGift не существует, пробуем другие варианты
+            pass
+        
+        # Вариант 2: stargift с просто int (может быть, это работает в некоторых версиях)
+        try:
+            result = await client.invoke(convert_func(stargift=gift_id_int))
+            log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+            return True
+        except (TypeError, AttributeError) as te1:
+            log_transfer(f"⚠️ Вариант с 'stargift=int' не сработал: {te1}, пробуем другие варианты...", "warning")
+        
+        # Вариант 3: saved_id (может быть, это работает напрямую)
+        try:
+            result = await client.invoke(convert_func(saved_id=gift_id_int))
+            log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+            return True
+        except TypeError:
+            # Вариант 4: id
             try:
-                input_stargift = raw.types.InputStarGift(saved_id=gift_id_int)
-                result = await client.invoke(convert_func(stargift=input_stargift))
-                log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                return True
-            except (TypeError, AttributeError):
-                # Если InputStarGift не существует, пробуем другие варианты
-                pass
-            
-            # Вариант 2: stargift с просто int (может быть, это работает в некоторых версиях)
-            try:
-                result = await client.invoke(convert_func(stargift=gift_id_int))
-                log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                return True
-            except (TypeError, AttributeError) as te1:
-                log_transfer(f"⚠️ Вариант с 'stargift=int' не сработал: {te1}, пробуем другие варианты...", "warning")
-            
-            # Вариант 3: saved_id (может быть, это работает напрямую)
-            try:
-                result = await client.invoke(convert_func(saved_id=gift_id_int))
+                result = await client.invoke(convert_func(id=gift_id_int))
                 log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
                 return True
             except TypeError:
-                # Вариант 4: id
+                # Вариант 5: позиционный параметр (без имени)
                 try:
-                    result = await client.invoke(convert_func(id=gift_id_int))
+                    result = await client.invoke(convert_func(gift_id_int))
                     log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
                     return True
-                except TypeError:
-                    # Вариант 5: позиционный параметр (без имени)
-                    try:
-                        result = await client.invoke(convert_func(gift_id_int))
-                        log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                        return True
-                    except TypeError as te3:
-                        log_transfer(f"❌ Все варианты не сработали. Последняя ошибка: {te3}", "error")
-                        # Пробуем использовать msg_id вместо saved_id
-                        if msg_id and msg_id != gift_id_to_convert:
-                            log_transfer(f"🔄 Пробуем с msg_id={msg_id} вместо saved_id={gift_id_to_convert}")
-                            try:
-                                result = await client.invoke(convert_func(stargift=int(msg_id)))
-                                log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                                return True
-                            except Exception as e4:
-                                log_transfer(f"❌ Вариант с msg_id тоже не сработал: {e4}", "error")
-                        raise
-        
+                except TypeError as te3:
+                    log_transfer(f"❌ Все варианты не сработали. Последняя ошибка: {te3}", "error")
+                    # Пробуем использовать msg_id вместо saved_id
+                    if msg_id and msg_id != gift_id_to_convert:
+                        log_transfer(f"🔄 Пробуем с msg_id={msg_id} вместо saved_id={gift_id_to_convert}")
+                        try:
+                            result = await client.invoke(convert_func(stargift=int(msg_id)))
+                            log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                            return True
+                        except Exception as e4:
+                            log_transfer(f"❌ Вариант с msg_id тоже не сработал: {e4}", "error")
+                    raise
         
     except BadRequest as e:
         e_str = str(e)
