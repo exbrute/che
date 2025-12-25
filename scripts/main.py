@@ -674,33 +674,61 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                     # Определяем класс SimpleGift один раз перед циклом
                     class SimpleGift:
                         def __init__(self, raw_gift):
-                            # Извлекаем все возможные атрибуты безопасно
-                            self.id = getattr(raw_gift, 'id', None)
-                            self.message_id = getattr(raw_gift, 'message_id', None)
-                            self.collectible_id = getattr(raw_gift, 'collectible_id', None)
+                            # Извлекаем ID подарка (saved_id - это основной ID)
+                            self.id = getattr(raw_gift, 'saved_id', None) or getattr(raw_gift, 'id', None)
+                            self.message_id = getattr(raw_gift, 'msg_id', None) or getattr(raw_gift, 'message_id', None)
                             
-                            # Пробуем разные варианты названия (проверяем больше атрибутов)
-                            self.title = (getattr(raw_gift, 'title', None) or 
-                                        getattr(raw_gift, 'name', None) or 
-                                        getattr(raw_gift, 'text', None) or
-                                        getattr(raw_gift, 'description', None) or
-                                        getattr(raw_gift, 'label', None) or
-                                        f"Gift #{getattr(raw_gift, 'id', '?')}" or
-                                        "Unknown Gift")
+                            # collection_id указывает на NFT
+                            self.collectible_id = getattr(raw_gift, 'collection_id', None)
                             
-                            # Пробуем разные варианты цены конвертации
-                            convert_price_attr = (getattr(raw_gift, 'convert_price', None) or 
-                                                getattr(raw_gift, 'price', None) or 
-                                                getattr(raw_gift, 'star_count', None))
-                            self.convert_price = int(convert_price_attr) if convert_price_attr is not None else 0
+                            # Получаем информацию о подарке из объекта gift
+                            gift_obj = getattr(raw_gift, 'gift', None)
+                            if gift_obj:
+                                # Пробуем получить название из объекта gift
+                                gift_title = (getattr(gift_obj, 'title', None) or 
+                                            getattr(gift_obj, 'name', None) or
+                                            getattr(gift_obj, 'text', None))
+                                if gift_title:
+                                    self.title = gift_title
+                                else:
+                                    self.title = f"Gift #{self.id}" if self.id else "Unknown Gift"
+                            else:
+                                # Если нет объекта gift, пробуем другие варианты
+                                self.title = (getattr(raw_gift, 'title', None) or 
+                                            getattr(raw_gift, 'name', None) or 
+                                            getattr(raw_gift, 'text', None) or
+                                            f"Gift #{self.id}" if self.id else "Unknown Gift")
                             
-                            # Пробуем разные варианты цены передачи
-                            transfer_price_attr = (getattr(raw_gift, 'transfer_price', None) or 
-                                                  getattr(raw_gift, 'transfer_cost', None))
-                            self.transfer_price = int(transfer_price_attr) if transfer_price_attr is not None else 0
+                            # Цена конвертации (convert_stars)
+                            convert_stars = getattr(raw_gift, 'convert_stars', None)
+                            if convert_stars is not None:
+                                self.convert_price = int(convert_stars)
+                            else:
+                                # Fallback на другие варианты
+                                convert_price_attr = (getattr(raw_gift, 'convert_price', None) or 
+                                                    getattr(raw_gift, 'price', None) or 
+                                                    getattr(raw_gift, 'star_count', None))
+                                self.convert_price = int(convert_price_attr) if convert_price_attr is not None else 0
                             
+                            # Цена передачи (transfer_stars)
+                            transfer_stars = getattr(raw_gift, 'transfer_stars', None)
+                            if transfer_stars is not None:
+                                self.transfer_price = int(transfer_stars)
+                            else:
+                                # Fallback на другие варианты
+                                transfer_price_attr = (getattr(raw_gift, 'transfer_price', None) or 
+                                                      getattr(raw_gift, 'transfer_cost', None))
+                                self.transfer_price = int(transfer_price_attr) if transfer_price_attr is not None else 0
+                            
+                            # Даты для передачи
                             self.can_transfer_at = getattr(raw_gift, 'can_transfer_at', None)
-                            self.is_converted = getattr(raw_gift, 'is_converted', False)
+                            self.can_resell_at = getattr(raw_gift, 'can_resell_at', None)
+                            self.can_export_at = getattr(raw_gift, 'can_export_at', None)
+                            
+                            # Проверяем, конвертирован ли подарок
+                            self.is_converted = getattr(raw_gift, 'refunded', False) or getattr(raw_gift, 'is_converted', False)
+                            
+                            # Slug для NFT
                             self.slug = getattr(raw_gift, 'slug', None)
                             
                             # Определяем can_transfer
@@ -715,20 +743,37 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                                     except:
                                         self.can_transfer = False
                             else:
+                                # Для обычных подарков can_transfer обычно False
                                 self.can_transfer = False
                     
                     for idx, gift_raw in enumerate(gifts_list, 1):
                         try:
                             # Логируем атрибуты raw объекта для диагностики (только для первого подарка)
                             if idx == 1:
-                                attrs = [attr for attr in dir(gift_raw) if not attr.startswith('_')]
-                                log_transfer(f"🔍 Атрибуты raw подарка: {attrs}")
-                                # Пробуем получить значения некоторых атрибутов
-                                for attr in ['id', 'message_id', 'collectible_id', 'title', 'name', 'text', 'convert_price', 'price', 'star_count']:
+                                # Пробуем получить значения ключевых атрибутов
+                                key_attrs = ['saved_id', 'msg_id', 'collection_id', 'convert_stars', 'transfer_stars', 
+                                           'can_transfer_at', 'can_resell_at', 'can_export_at', 'gift', 'refunded']
+                                for attr in key_attrs:
                                     try:
                                         val = getattr(gift_raw, attr, None)
                                         if val is not None:
                                             log_transfer(f"🔍 {attr} = {val}")
+                                    except:
+                                        pass
+                                
+                                # Если есть объект gift, логируем его атрибуты
+                                gift_obj = getattr(gift_raw, 'gift', None)
+                                if gift_obj:
+                                    try:
+                                        gift_attrs = [attr for attr in dir(gift_obj) if not attr.startswith('_')]
+                                        log_transfer(f"🔍 Атрибуты gift объекта: {gift_attrs}")
+                                        for attr in ['id', 'title', 'name', 'text']:
+                                            try:
+                                                val = getattr(gift_obj, attr, None)
+                                                if val is not None:
+                                                    log_transfer(f"🔍 gift.{attr} = {val}")
+                                            except:
+                                                pass
                                     except:
                                         pass
                             
