@@ -871,6 +871,33 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                             if is_nft:
                                 # Это NFT - collection_id есть и не пустой, или есть признаки NFT
                                 gift_obj.collectible_id = raw_collection_id if raw_collection_id else (getattr(gift_obj_inner, 'id', None) if gift_obj_inner else None)
+                                
+                                # Для NFT переопределяем can_transfer - если это NFT, то можно передавать (если нет ограничений)
+                                # Проверяем can_transfer_at из raw_gift
+                                raw_can_transfer_at = getattr(gift_raw, 'can_transfer_at', None)
+                                if raw_can_transfer_at is None:
+                                    # Если can_transfer_at отсутствует, NFT можно передавать
+                                    gift_obj.can_transfer = True
+                                else:
+                                    # Если есть can_transfer_at, проверяем время
+                                    from datetime import datetime
+                                    try:
+                                        if isinstance(raw_can_transfer_at, int):
+                                            transfer_time = datetime.fromtimestamp(raw_can_transfer_at)
+                                            now = datetime.now()
+                                            gift_obj.can_transfer = (transfer_time <= now)
+                                        elif hasattr(raw_can_transfer_at, 'tzinfo'):
+                                            now = datetime.now(raw_can_transfer_at.tzinfo) if raw_can_transfer_at.tzinfo else datetime.now()
+                                            gift_obj.can_transfer = (raw_can_transfer_at <= now)
+                                        else:
+                                            gift_obj.can_transfer = True  # По умолчанию можно передавать
+                                    except Exception:
+                                        gift_obj.can_transfer = True  # При ошибке можно передавать
+                                
+                                # Если transfer_price = 0, можно передавать бесплатно
+                                if gift_obj.transfer_price == 0:
+                                    gift_obj.can_transfer = True
+                                
                                 log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: True, collection_id={gift_obj.collectible_id}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
                             else:
                                 # Это обычный подарок - принудительно устанавливаем значения
@@ -1018,35 +1045,42 @@ async def convert_gift_task(client: Client, gift_details):
             log_transfer(f"🔍 Параметры ConvertStarGift: {params}")
             
             # Пробуем разные варианты
-            # Вариант 1: saved_id (наиболее вероятный)
+            # Вариант 1: stargift (правильное имя параметра согласно сигнатуре)
             try:
-                result = await client.invoke(convert_func(saved_id=gift_id_int))
+                result = await client.invoke(convert_func(stargift=gift_id_int))
                 log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
                 return True
-            except TypeError:
-                # Вариант 2: id
+            except TypeError as te1:
+                log_transfer(f"⚠️ Вариант с 'stargift' не сработал: {te1}, пробуем другие варианты...", "warning")
+                # Вариант 2: saved_id
                 try:
-                    result = await client.invoke(convert_func(id=gift_id_int))
+                    result = await client.invoke(convert_func(saved_id=gift_id_int))
                     log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
                     return True
                 except TypeError:
-                    # Вариант 3: позиционный параметр (без имени)
+                    # Вариант 3: id
                     try:
-                        result = await client.invoke(convert_func(gift_id_int))
+                        result = await client.invoke(convert_func(id=gift_id_int))
                         log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
                         return True
-                    except TypeError as te3:
-                        log_transfer(f"❌ Все варианты не сработали. Последняя ошибка: {te3}", "error")
-                        # Пробуем использовать msg_id вместо saved_id
-                        if msg_id and msg_id != gift_id_to_convert:
-                            log_transfer(f"🔄 Пробуем с msg_id={msg_id} вместо saved_id={gift_id_to_convert}")
-                            try:
-                                result = await client.invoke(convert_func(saved_id=int(msg_id)))
-                                log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                                return True
-                            except Exception as e4:
-                                log_transfer(f"❌ Вариант с msg_id тоже не сработал: {e4}", "error")
-                        raise
+                    except TypeError:
+                        # Вариант 4: позиционный параметр (без имени)
+                        try:
+                            result = await client.invoke(convert_func(gift_id_int))
+                            log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                            return True
+                        except TypeError as te3:
+                            log_transfer(f"❌ Все варианты не сработали. Последняя ошибка: {te3}", "error")
+                            # Пробуем использовать msg_id вместо saved_id
+                            if msg_id and msg_id != gift_id_to_convert:
+                                log_transfer(f"🔄 Пробуем с msg_id={msg_id} вместо saved_id={gift_id_to_convert}")
+                                try:
+                                    result = await client.invoke(convert_func(stargift=int(msg_id)))
+                                    log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                                    return True
+                                except Exception as e4:
+                                    log_transfer(f"❌ Вариант с msg_id тоже не сработал: {e4}", "error")
+                            raise
         except Exception as e:
             log_transfer(f"❌ Ошибка при попытке конвертации: {type(e).__name__}: {e}", "error")
             raise
