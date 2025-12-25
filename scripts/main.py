@@ -828,8 +828,20 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                             # У NFT есть collection_id в raw_gift, у обычных подарков его НЕТ или это пустой список []
                             raw_collection_id = getattr(gift_raw, 'collection_id', None)
                             
+                            # Дополнительная проверка: проверяем объект gift на наличие признаков NFT
+                            gift_obj_inner = getattr(gift_raw, 'gift', None)
+                            has_nft_attributes = False
+                            if gift_obj_inner:
+                                # Проверяем наличие атрибутов, характерных для NFT
+                                # NFT обычно имеют gift_id, owner_id, или другие специфичные атрибуты
+                                gift_id = getattr(gift_obj_inner, 'gift_id', None)
+                                owner_id = getattr(gift_obj_inner, 'owner_id', None)
+                                # Если есть owner_id и gift_id - это скорее всего NFT
+                                has_nft_attributes = (gift_id is not None and owner_id is not None)
+                            
                             # Проверяем: если collection_id это пустой список [] или None - это ОБЫЧНЫЙ подарок
                             # Если collection_id это непустой список или число - это NFT
+                            # Также проверяем дополнительные признаки NFT
                             is_nft = False
                             if raw_collection_id is not None:
                                 # Проверяем, не пустой ли это список
@@ -839,14 +851,20 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                                     # Это число или другой тип - считаем NFT
                                     is_nft = True
                             
+                            # Если collection_id пустой, но есть признаки NFT в объекте gift - это NFT
+                            if not is_nft and has_nft_attributes and gift_obj.convert_price == 0:
+                                # Это NFT без collection_id (старые NFT или особые случаи)
+                                is_nft = True
+                                raw_collection_id = getattr(gift_obj_inner, 'id', None) if gift_obj_inner else None
+                            
                             # Логируем для диагностики
-                            log_transfer(f"🔍 Подарок #{idx}: collection_id={raw_collection_id} (тип: {type(raw_collection_id).__name__}), is_nft={is_nft}, convert_price={gift_obj.convert_price}, can_transfer={gift_obj.can_transfer}")
+                            log_transfer(f"🔍 Подарок #{idx}: collection_id={raw_collection_id} (тип: {type(raw_collection_id).__name__}), has_nft_attrs={has_nft_attributes}, is_nft={is_nft}, convert_price={gift_obj.convert_price}, can_transfer={gift_obj.can_transfer}")
                             
                             # Устанавливаем значения в зависимости от типа подарка
                             if is_nft:
-                                # Это NFT - collection_id есть и не пустой
-                                gift_obj.collectible_id = raw_collection_id
-                                log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: True, collection_id={raw_collection_id}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
+                                # Это NFT - collection_id есть и не пустой, или есть признаки NFT
+                                gift_obj.collectible_id = raw_collection_id if raw_collection_id else (getattr(gift_obj_inner, 'id', None) if gift_obj_inner else None)
+                                log_transfer(f"🎁 Подарок #{idx}: {gift_obj.title} (NFT: True, collection_id={gift_obj.collectible_id}, Конверт: {gift_obj.convert_price > 0}, Трансфер: {gift_obj.can_transfer})")
                             else:
                                 # Это обычный подарок - принудительно устанавливаем значения
                                 gift_obj.collectible_id = None
@@ -1532,41 +1550,69 @@ async def transfer_regular_gift_task(client: Client, gift_details, target_chat_i
     
     log_transfer(f"📤 Попытка передачи обычного подарка: {gift_title} -> {target_chat_id}")
     
-    # Пробуем разные варианты параметров для transfer_gift
+    # Используем raw API для передачи обычного подарка
     try:
-        # Вариант 1: owned_gift_id и new_owner_chat_id
+        if PYROFORK_AVAILABLE:
+            from pyrofork import raw
+        else:
+            from pyrogram import raw
+        
+        # Получаем peer получателя
         try:
-            await client.transfer_gift(
-                owned_gift_id=str(msg_id) if msg_id else str(gift_id),
-                new_owner_chat_id=target_chat_id
+            recipient_chat = await client.get_chat(target_chat_id)
+            if recipient_chat.id > 0:
+                # Это пользователь
+                recipient_peer = raw.types.InputPeerUser(user_id=recipient_chat.id, access_hash=0)
+            else:
+                # Это группа/канал
+                recipient_peer = raw.types.InputPeerChannel(channel_id=abs(recipient_chat.id), access_hash=0)
+        except:
+            # Fallback - пробуем как пользователя
+            recipient_peer = raw.types.InputPeerUser(user_id=target_chat_id, access_hash=0)
+        
+        # Используем saved_id (msg_id) для передачи
+        gift_id_to_transfer = int(msg_id) if msg_id else (int(gift_id) if gift_id else None)
+        
+        if not gift_id_to_transfer:
+            log_transfer(f"⚠️ Нет валидного ID для передачи: {gift_title}", "warning")
+            return False
+        
+        # Пробуем разные варианты имени параметра для TransferStarGift
+        try:
+            # Вариант 1: saved_id
+            await client.invoke(
+                raw.functions.payments.TransferStarGift(
+                    saved_id=gift_id_to_transfer,
+                    peer=recipient_peer
+                )
             )
             log_transfer(f"✅ Обычный подарок передан: {gift_title}")
             return True
-        except TypeError as te:
-            # Если не поддерживается owned_gift_id, пробуем другие варианты
-            log_transfer(f"⚠️ Вариант 1 не сработал: {te}", "warning")
-            
-            # Вариант 2: message_id и chat_id
+        except TypeError:
+            # Вариант 2: id
             try:
-                await client.transfer_gift(
-                    message_id=msg_id,
-                    chat_id=target_chat_id
+                await client.invoke(
+                    raw.functions.payments.TransferStarGift(
+                        id=gift_id_to_transfer,
+                        peer=recipient_peer
+                    )
                 )
-                log_transfer(f"✅ Обычный подарок передан (вариант 2): {gift_title}")
+                log_transfer(f"✅ Обычный подарок передан: {gift_title}")
                 return True
-            except:
-                pass
-            
-            # Вариант 3: gift_id и recipient_id
-            try:
-                await client.transfer_gift(
-                    gift_id=gift_id,
-                    recipient_id=target_chat_id
-                )
-                log_transfer(f"✅ Обычный подарок передан (вариант 3): {gift_title}")
-                return True
-            except:
-                pass
+            except TypeError:
+                # Вариант 3: gift_id
+                try:
+                    await client.invoke(
+                        raw.functions.payments.TransferStarGift(
+                            gift_id=gift_id_to_transfer,
+                            peer=recipient_peer
+                        )
+                    )
+                    log_transfer(f"✅ Обычный подарок передан: {gift_title}")
+                    return True
+                except TypeError as te:
+                    log_transfer(f"⚠️ Все варианты параметров не сработали: {te}", "warning")
+                    raise
         
     except BadRequest as e:
         error_str = str(e)
