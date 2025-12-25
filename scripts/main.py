@@ -1035,16 +1035,13 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
     if raw_gift_obj is not None:
         saved_id_to_use = getattr(raw_gift_obj, 'saved_id', None) or saved_id
     
-    if not saved_id_to_use:
-        # Если saved_id нет, ищем его через Pyrogram API
+    # Если saved_id нет, ищем его через Pyrogram API по msg_id
+    if not saved_id_to_use and msg_id:
         try:
             if PYROFORK_AVAILABLE:
                 from pyrofork import raw
             else:
                 from pyrogram import raw
-            
-            gift_id_to_convert = msg_id if msg_id else saved_id
-            gift_id_int = int(gift_id_to_convert) if gift_id_to_convert else 0
             
             peer = raw.types.InputPeerSelf()
             gifts_result = await client.invoke(
@@ -1055,14 +1052,15 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
                 )
             )
             if hasattr(gifts_result, 'gifts') and gifts_result.gifts:
+                msg_id_int = int(msg_id)
                 for gift_item in gifts_result.gifts:
-                    gift_saved_id = getattr(gift_item, 'saved_id', None)
                     gift_msg_id = getattr(gift_item, 'msg_id', None)
-                    if (gift_saved_id == gift_id_int or 
-                        gift_msg_id == gift_id_int or
-                        (msg_id and gift_msg_id == int(msg_id))):
-                        saved_id_to_use = gift_saved_id
-                        break
+                    # Ищем подарок по msg_id
+                    if gift_msg_id == msg_id_int:
+                        saved_id_to_use = getattr(gift_item, 'saved_id', None)
+                        if saved_id_to_use:
+                            log_transfer(f"✅ Найден saved_id={saved_id_to_use} для msg_id={msg_id}")
+                            break
         except Exception as e:
             log_transfer(f"⚠️ Не удалось найти saved_id: {type(e).__name__}: {e}", "warning")
     
