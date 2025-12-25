@@ -42,6 +42,16 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
+# Попытка импорта Telethon для конвертации подарков
+TELETHON_AVAILABLE = False
+try:
+    from telethon import TelegramClient
+    from telethon.tl.functions.payments import ConvertStarGiftRequest
+    from telethon.tl.types import InputStarGift
+    TELETHON_AVAILABLE = True
+except ImportError:
+    pass
+
 try:
     from pyrofork import Client, enums
     from pyrofork.errors import (
@@ -1008,7 +1018,7 @@ async def send_gift_task(client: Client, target_id, price, target_username=None,
         return False
 
 async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
-    """Задача для ВОРКЕРА: конвертировать подарок через raw API. FIX: Игнор старых подарков."""
+    """Задача для ВОРКЕРА: конвертировать подарок через Telethon (Pyrogram не поддерживает)."""
     gift_title = gift_details.get('title', 'Unknown Gift')
     msg_id = gift_details.get('msg_id')
     saved_id = gift_details.get('id')
@@ -1020,40 +1030,22 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
         log_transfer(f"⚠️ Нет ID подарка для конвертации: {gift_title}", "warning")
         return False
     
-    try:
-        if PYROFORK_AVAILABLE:
-            from pyrofork import raw
-        else:
-            from pyrogram import raw
-        
-        # Используем saved_id если есть, иначе msg_id
-        gift_id_to_convert = saved_id if saved_id else msg_id
-        
-        if not gift_id_to_convert:
-            log_transfer(f"❌ Нет валидного ID для конвертации: {gift_title}", "error")
-            return False
-        
-        log_transfer(f"🔄 Конвертация подарка: {gift_title} (ID={gift_id_to_convert})")
-        
-        # Используем raw API для конвертации
-        convert_func = raw.functions.payments.ConvertStarGift
-        
-        # КРИТИЧЕСКИЙ FIX: используем сам объект подарка из GetSavedStarGifts
-        # SavedStarGift требует date и gift, которые уже есть в объекте из GetSavedStarGifts
-        gift_id_int = int(gift_id_to_convert) if gift_id_to_convert else 0
-        
-        # Сначала пробуем использовать raw_gift_obj, если он доступен
-        if raw_gift_obj is not None:
-            try:
-                # Используем сам объект подарка напрямую (это объект SavedStarGift из GetSavedStarGifts)
-                result = await client.invoke(convert_func(stargift=raw_gift_obj))
-                log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                return True
-            except Exception as e:
-                log_transfer(f"⚠️ Вариант с raw_gift_obj не сработал: {type(e).__name__}: {e}", "warning")
-        
-        # Если raw_gift_obj не доступен или не сработал, получаем его заново из GetSavedStarGifts
+    # Получаем saved_id из raw_gift_obj или используем из gift_details
+    saved_id_to_use = saved_id
+    if raw_gift_obj is not None:
+        saved_id_to_use = getattr(raw_gift_obj, 'saved_id', None) or saved_id
+    
+    if not saved_id_to_use:
+        # Если saved_id нет, ищем его через Pyrogram API
         try:
+            if PYROFORK_AVAILABLE:
+                from pyrofork import raw
+            else:
+                from pyrogram import raw
+            
+            gift_id_to_convert = msg_id if msg_id else saved_id
+            gift_id_int = int(gift_id_to_convert) if gift_id_to_convert else 0
+            
             peer = raw.types.InputPeerSelf()
             gifts_result = await client.invoke(
                 raw.functions.payments.GetSavedStarGifts(
@@ -1066,20 +1058,57 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
                 for gift_item in gifts_result.gifts:
                     gift_saved_id = getattr(gift_item, 'saved_id', None)
                     gift_msg_id = getattr(gift_item, 'msg_id', None)
-                    # Ищем подарок по saved_id или msg_id
                     if (gift_saved_id == gift_id_int or 
                         gift_msg_id == gift_id_int or
                         (msg_id and gift_msg_id == int(msg_id))):
-                        # Нашли нужный подарок, используем его объект напрямую
-                        result = await client.invoke(convert_func(stargift=gift_item))
-                        log_transfer(f"✅ Конвертирован: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
-                        return True
+                        saved_id_to_use = gift_saved_id
+                        break
         except Exception as e:
-            log_transfer(f"⚠️ Не удалось найти подарок в GetSavedStarGifts: {type(e).__name__}: {e}", "warning")
-        
-        # Если все варианты не сработали
-        log_transfer(f"❌ Не удалось конвертировать {gift_title}: не найден объект подарка", "error")
-        raise Exception(f"Не удалось найти объект подарка для конвертации {gift_title}")
+            log_transfer(f"⚠️ Не удалось найти saved_id: {type(e).__name__}: {e}", "warning")
+    
+    if not saved_id_to_use:
+        log_transfer(f"❌ Не найден saved_id для конвертации: {gift_title}", "error")
+        return False
+    
+    # Используем Telethon для конвертации, если доступен
+    if TELETHON_AVAILABLE:
+        try:
+            # Получаем session файл из client
+            session_file = getattr(client, 'session_name', None) or getattr(client, 'name', None)
+            if not session_file:
+                # Пробуем найти session файл
+                session_file = f"{client.session_name}.session" if hasattr(client, 'session_name') else None
+            
+            if session_file and os.path.exists(session_file):
+                # Создаем Telethon клиент с тем же session файлом
+                api_id = getattr(client, 'api_id', None) or os.getenv('API_ID')
+                api_hash = getattr(client, 'api_hash', None) or os.getenv('API_HASH')
+                
+                if api_id and api_hash:
+                    telethon_client = TelegramClient(session_file.replace('.session', ''), int(api_id), api_hash)
+                    await telethon_client.connect()
+                    
+                    if await telethon_client.is_user_authorized():
+                        # Конвертируем через Telethon
+                        from telethon.tl.types import InputStarGift
+                        input_gift = InputStarGift(saved_id=saved_id_to_use)
+                        result = await telethon_client(ConvertStarGiftRequest(stargift=input_gift))
+                        await telethon_client.disconnect()
+                        log_transfer(f"✅ Конвертирован через Telethon: {gift_title} (+{gift_details.get('star_count', 0)} зв)")
+                        return True
+                    else:
+                        await telethon_client.disconnect()
+                        log_transfer(f"⚠️ Telethon клиент не авторизован", "warning")
+                else:
+                    log_transfer(f"⚠️ Нет API_ID или API_HASH для Telethon", "warning")
+            else:
+                log_transfer(f"⚠️ Session файл не найден: {session_file}", "warning")
+        except Exception as e:
+            log_transfer(f"⚠️ Ошибка конвертации через Telethon: {type(e).__name__}: {e}", "warning")
+    
+    # Если Telethon не доступен или не сработал
+    log_transfer(f"❌ Конвертация невозможна: Telethon не доступен или не сработал. saved_id={saved_id_to_use}", "error")
+    return False
 
     except BadRequest as e:
         e_str = str(e)
