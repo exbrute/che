@@ -464,7 +464,6 @@ async def get_stars_info(client: Client):
     try:
         me = await client.get_me()
         user_id = me.id
-        log_transfer(f"🔍 Получение баланса для пользователя ID: {user_id}")
     except Exception as e:
         log_transfer(f"Ошибка получения информации о пользователе: {e}", "error")
         user_id = None
@@ -502,32 +501,17 @@ async def get_stars_info(client: Client):
             )
         )
         
-        log_transfer(f"🔍 Raw API результат: {type(result).__name__}, атрибуты: {dir(result)}")
-        
         if hasattr(result, 'balance'):
             balance_obj = result.balance
-            log_transfer(f"🔍 Balance объект: {type(balance_obj).__name__}, атрибуты: {dir(balance_obj)}")
-            
             if hasattr(balance_obj, 'stars'):
-                balance_int = int(balance_obj.stars)
-                log_transfer(f"✅ Баланс (raw API stars): {balance_int} ⭐️")
-                return balance_int
+                return int(balance_obj.stars)
             elif hasattr(balance_obj, 'value'):
-                balance_int = int(balance_obj.value)
-                log_transfer(f"✅ Баланс (raw API value): {balance_int} ⭐️")
-                return balance_int
+                return int(balance_obj.value)
             elif hasattr(balance_obj, 'amount'):
-                balance_int = int(balance_obj.amount)
-                log_transfer(f"✅ Баланс (raw API amount): {balance_int} ⭐️")
-                return balance_int
+                return int(balance_obj.amount)
         
-        # Попробуем получить баланс напрямую из result
         if hasattr(result, 'stars'):
-            balance_int = int(result.stars)
-            log_transfer(f"✅ Баланс (result.stars): {balance_int} ⭐️")
-            return balance_int
-        
-        log_transfer(f"⚠️ Не удалось извлечь баланс из результата: {result}", "warning")
+            return int(result.stars)
         
     except Exception as e:
         log_transfer(f"⚠️ Ошибка raw API: {type(e).__name__}: {e}", "warning")
@@ -676,8 +660,6 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
             except:
                 peer = raw.types.InputPeerSelf()
         
-        # Используем raw API напрямую с обязательными параметрами
-        log_transfer(f"🔍 Вызов raw.functions.payments.GetSavedStarGifts(peer={type(peer).__name__}, offset='', limit=100)")
         result = await client.invoke(
             raw.functions.payments.GetSavedStarGifts(
                 peer=peer,
@@ -686,26 +668,19 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
             )
         )
         
-        log_transfer(f"🔍 Raw API результат получен: {type(result).__name__}")
-        
-        # Обрабатываем пагинацию
         offset = ""
-        total_gifts = 0
-        
         while True:
             if hasattr(result, 'gifts'):
                 gifts_list = result.gifts
-                gifts_count = len(gifts_list) if gifts_list else 0
-                log_transfer(f"🔍 Найдено подарков в этой странице: {gifts_count}")
-                total_gifts += gifts_count
                 
                 if gifts_list:
                     # Определяем класс SimpleGift один раз перед циклом
                     class SimpleGift:
                         def __init__(self, raw_gift):
-                            # Извлекаем ID подарка (saved_id - это основной ID для конвертации)
-                            self.id = getattr(raw_gift, 'saved_id', None) or getattr(raw_gift, 'id', None)
-                            self.saved_id = getattr(raw_gift, 'saved_id', None)  # Сохраняем saved_id отдельно
+                            self.saved_id = (getattr(raw_gift, 'saved_id', None) or 
+                                            getattr(raw_gift, 'id', None) or
+                                            getattr(raw_gift, 'ID', None))
+                            self.id = self.saved_id
                             self.message_id = getattr(raw_gift, 'msg_id', None) or getattr(raw_gift, 'message_id', None)
                             
                             # Получаем информацию о подарке из объекта gift
@@ -827,20 +802,6 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                                         pass
                                 
                                 # Если есть объект gift, логируем его атрибуты
-                                gift_obj = getattr(gift_raw, 'gift', None)
-                                if gift_obj:
-                                    try:
-                                        gift_attrs = [attr for attr in dir(gift_obj) if not attr.startswith('_')]
-                                        log_transfer(f"🔍 Атрибуты gift объекта: {gift_attrs}")
-                                        for attr in ['id', 'title', 'name', 'text']:
-                                            try:
-                                                val = getattr(gift_obj, attr, None)
-                                                if val is not None:
-                                                    log_transfer(f"🔍 gift.{attr} = {val}")
-                                            except:
-                                                pass
-                                    except:
-                                        pass
                             
                             # Создаем SimpleGift напрямую из raw объекта
                             gift_obj = SimpleGift(gift_raw)
@@ -879,9 +840,6 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                                 # Это NFT без collection_id (старые NFT или особые случаи)
                                 is_nft = True
                                 raw_collection_id = getattr(gift_obj_inner, 'id', None) if gift_obj_inner else None
-                            
-                            # Логируем для диагностики
-                            log_transfer(f"🔍 Подарок #{idx}: collection_id={raw_collection_id} (тип: {type(raw_collection_id).__name__}), has_nft_attrs={has_nft_attributes}, is_nft={is_nft}, convert_price={gift_obj.convert_price}, can_transfer={gift_obj.can_transfer}")
                             
                             # Устанавливаем значения в зависимости от типа подарка
                             if is_nft:
@@ -930,7 +888,6 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
                 # Проверяем, есть ли еще страницы
                 if hasattr(result, 'next_offset') and result.next_offset:
                     offset = result.next_offset
-                    log_transfer(f"🔍 Загружаем следующую страницу подарков (offset: {offset})")
                     result = await client.invoke(
                         raw.functions.payments.GetSavedStarGifts(
                             peer=peer,
@@ -1048,7 +1005,9 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
                 msg_id_int = int(msg_id)
                 for gift_item in gifts_result.gifts:
                     if getattr(gift_item, 'msg_id', None) == msg_id_int:
-                        saved_id_to_use = getattr(gift_item, 'saved_id', None)
+                        saved_id_to_use = (getattr(gift_item, 'saved_id', None) or 
+                                          getattr(gift_item, 'id', None) or
+                                          getattr(gift_item, 'ID', None))
                         if saved_id_to_use:
                             break
         except:
