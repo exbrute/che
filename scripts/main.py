@@ -1056,14 +1056,29 @@ async def convert_gift_task(client: Client, gift_details, raw_gift_obj=None):
             )
             if hasattr(gifts_result, 'gifts') and gifts_result.gifts:
                 msg_id_int = int(msg_id)
-                for gift_item in gifts_result.gifts:
+                log_transfer(f"🔍 Проверяем {len(gifts_result.gifts)} подарков для поиска msg_id={msg_id_int}")
+                found_gift = False
+                for idx, gift_item in enumerate(gifts_result.gifts):
                     gift_msg_id = getattr(gift_item, 'msg_id', None)
+                    gift_saved_id = getattr(gift_item, 'saved_id', None)
+                    # Логируем первые несколько подарков для диагностики
+                    if idx < 3:
+                        log_transfer(f"🔍 Подарок #{idx}: msg_id={gift_msg_id}, saved_id={gift_saved_id}")
                     # Ищем подарок по msg_id
                     if gift_msg_id == msg_id_int:
-                        saved_id_to_use = getattr(gift_item, 'saved_id', None)
+                        found_gift = True
+                        saved_id_to_use = gift_saved_id
                         if saved_id_to_use:
                             log_transfer(f"✅ Найден saved_id={saved_id_to_use} для msg_id={msg_id}")
                             break
+                        else:
+                            log_transfer(f"⚠️ Найден подарок с msg_id={msg_id_int}, но saved_id=None. Атрибуты: {[attr for attr in dir(gift_item) if not attr.startswith('_')][:10]}")
+                if not found_gift:
+                    log_transfer(f"⚠️ Подарок с msg_id={msg_id_int} не найден в GetSavedStarGifts. Проверено {len(gifts_result.gifts)} подарков")
+                elif not saved_id_to_use:
+                    log_transfer(f"⚠️ Подарок найден, но saved_id=None")
+            else:
+                log_transfer(f"⚠️ GetSavedStarGifts вернул пустой список подарков")
         except Exception as e:
             log_transfer(f"⚠️ Не удалось найти saved_id: {type(e).__name__}: {e}", "warning")
     
