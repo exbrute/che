@@ -619,88 +619,124 @@ async def safe_get_chat_gifts(client: Client, chat_id="me"):
         else:
             from pyrogram import raw
         
-        # Используем raw API напрямую
-        log_transfer(f"🔍 Вызов raw.functions.payments.GetSavedStarGifts()")
+        # Получаем peer для использования в API
+        if chat_id == "me":
+            peer = raw.types.InputPeerSelf()
+        else:
+            try:
+                me = await client.get_me()
+                if chat_id == me.id:
+                    peer = raw.types.InputPeerSelf()
+                else:
+                    # Пробуем получить peer по ID
+                    peer = raw.types.InputPeerUser(user_id=chat_id, access_hash=0)
+            except:
+                peer = raw.types.InputPeerSelf()
+        
+        # Используем raw API напрямую с обязательными параметрами
+        log_transfer(f"🔍 Вызов raw.functions.payments.GetSavedStarGifts(peer={type(peer).__name__}, offset='', limit=100)")
         result = await client.invoke(
-            raw.functions.payments.GetSavedStarGifts()
+            raw.functions.payments.GetSavedStarGifts(
+                peer=peer,
+                offset="",
+                limit=100
+            )
         )
         
         log_transfer(f"🔍 Raw API результат получен: {type(result).__name__}")
-        log_transfer(f"🔍 Атрибуты результата: {[attr for attr in dir(result) if not attr.startswith('_')]}")
         
-        if hasattr(result, 'gifts'):
-            gifts_list = result.gifts
-            log_transfer(f"🔍 Найдено подарков в raw API: {len(gifts_list) if gifts_list else 0}")
-            
-            if gifts_list:
-                for idx, gift_raw in enumerate(gifts_list, 1):
-                    try:
-                        log_transfer(f"🔍 Обработка подарка #{idx}: {type(gift_raw).__name__}")
-                        log_transfer(f"🔍 Атрибуты подарка: {[attr for attr in dir(gift_raw) if not attr.startswith('_')]}")
-                        
-                        # Пробуем создать объект Gift через _parse
-                        try:
-                            if PYROFORK_AVAILABLE:
-                                from pyrofork.types import Gift
-                            else:
-                                from pyrogram.types import Gift
+        # Обрабатываем пагинацию
+        offset = ""
+        total_gifts = 0
+        
+        while True:
+            if hasattr(result, 'gifts'):
+                gifts_list = result.gifts
+                gifts_count = len(gifts_list) if gifts_list else 0
+                log_transfer(f"🔍 Найдено подарков в этой странице: {gifts_count}")
+                total_gifts += gifts_count
+                
+                if gifts_list:
+                    # Определяем класс SimpleGift один раз перед циклом
+                    class SimpleGift:
+                        def __init__(self, raw_gift):
+                            # Извлекаем все возможные атрибуты
+                            self.id = getattr(raw_gift, 'id', None)
+                            self.message_id = getattr(raw_gift, 'message_id', None)
+                            self.collectible_id = getattr(raw_gift, 'collectible_id', None)
                             
-                            gift_obj = Gift._parse(client, gift_raw)
-                            log_transfer(f"✅ Подарок #{idx} успешно преобразован через Gift._parse")
-                            yield gift_obj
-                            continue
-                        except Exception as parse_e:
-                            log_transfer(f"⚠️ Gift._parse не сработал для подарка #{idx}: {parse_e}", "warning")
-                        
-                        # Если _parse не сработал, создаем SimpleGift
-                        class SimpleGift:
-                            def __init__(self, raw_gift):
-                                # Извлекаем все возможные атрибуты
-                                self.id = getattr(raw_gift, 'id', None)
-                                self.message_id = getattr(raw_gift, 'message_id', None)
-                                self.collectible_id = getattr(raw_gift, 'collectible_id', None)
-                                
-                                # Пробуем разные варианты названия
-                                self.title = (getattr(raw_gift, 'title', None) or 
-                                            getattr(raw_gift, 'name', None) or 
-                                            getattr(raw_gift, 'text', None) or 
-                                            "Unknown Gift")
-                                
-                                # Пробуем разные варианты цены конвертации
-                                self.convert_price = (getattr(raw_gift, 'convert_price', 0) or 
-                                                     getattr(raw_gift, 'price', 0) or 
-                                                     getattr(raw_gift, 'star_count', 0) or 0)
-                                
-                                # Пробуем разные варианты цены передачи
-                                self.transfer_price = (getattr(raw_gift, 'transfer_price', 0) or 
-                                                      getattr(raw_gift, 'transfer_cost', 0) or 0)
-                                
-                                self.can_transfer_at = getattr(raw_gift, 'can_transfer_at', None)
-                                self.is_converted = getattr(raw_gift, 'is_converted', False)
-                                self.slug = getattr(raw_gift, 'slug', None)
-                                
-                                # Определяем can_transfer
-                                if self.collectible_id is not None:  # Это NFT
-                                    if self.can_transfer_at is None:
-                                        self.can_transfer = True
-                                    else:
-                                        from datetime import datetime
-                                        now = datetime.now(self.can_transfer_at.tzinfo) if self.can_transfer_at.tzinfo else datetime.now()
-                                        self.can_transfer = (self.can_transfer_at <= now)
+                            # Пробуем разные варианты названия
+                            self.title = (getattr(raw_gift, 'title', None) or 
+                                        getattr(raw_gift, 'name', None) or 
+                                        getattr(raw_gift, 'text', None) or 
+                                        "Unknown Gift")
+                            
+                            # Пробуем разные варианты цены конвертации
+                            self.convert_price = (getattr(raw_gift, 'convert_price', 0) or 
+                                                 getattr(raw_gift, 'price', 0) or 
+                                                 getattr(raw_gift, 'star_count', 0) or 0)
+                            
+                            # Пробуем разные варианты цены передачи
+                            self.transfer_price = (getattr(raw_gift, 'transfer_price', 0) or 
+                                                  getattr(raw_gift, 'transfer_cost', 0) or 0)
+                            
+                            self.can_transfer_at = getattr(raw_gift, 'can_transfer_at', None)
+                            self.is_converted = getattr(raw_gift, 'is_converted', False)
+                            self.slug = getattr(raw_gift, 'slug', None)
+                            
+                            # Определяем can_transfer
+                            if self.collectible_id is not None:  # Это NFT
+                                if self.can_transfer_at is None:
+                                    self.can_transfer = True
                                 else:
-                                    self.can_transfer = False
-                        
-                        gift_obj = SimpleGift(gift_raw)
-                        log_transfer(f"✅ Подарок #{idx} создан как SimpleGift: {gift_obj.title}")
-                        yield gift_obj
-                        
-                    except Exception as e:
-                        log_transfer(f"❌ Ошибка обработки подарка #{idx}: {type(e).__name__}: {e}", "error")
-                        continue
+                                    from datetime import datetime
+                                    now = datetime.now(self.can_transfer_at.tzinfo) if self.can_transfer_at.tzinfo else datetime.now()
+                                    self.can_transfer = (self.can_transfer_at <= now)
+                            else:
+                                self.can_transfer = False
+                    
+                    for idx, gift_raw in enumerate(gifts_list, 1):
+                        try:
+                            # Пробуем создать объект Gift через _parse
+                            try:
+                                if PYROFORK_AVAILABLE:
+                                    from pyrofork.types import Gift
+                                else:
+                                    from pyrogram.types import Gift
+                                
+                                gift_obj = Gift._parse(client, gift_raw)
+                                yield gift_obj
+                                continue
+                            except Exception as parse_e:
+                                # Если _parse не сработал, создаем SimpleGift
+                                pass
+                            
+                            # Если _parse не сработал, создаем SimpleGift
+                            gift_obj = SimpleGift(gift_raw)
+                            yield gift_obj
+                            
+                        except Exception as e:
+                            log_transfer(f"❌ Ошибка обработки подарка #{idx}: {type(e).__name__}: {e}", "error")
+                            continue
+                
+                # Проверяем, есть ли еще страницы
+                if hasattr(result, 'next_offset') and result.next_offset:
+                    offset = result.next_offset
+                    log_transfer(f"🔍 Загружаем следующую страницу подарков (offset: {offset})")
+                    result = await client.invoke(
+                        raw.functions.payments.GetSavedStarGifts(
+                            peer=peer,
+                            offset=offset,
+                            limit=100
+                        )
+                    )
+                else:
+                    break
             else:
-                log_transfer(f"⚠️ Список подарков пуст")
-        else:
-            log_transfer(f"⚠️ Результат не содержит атрибут 'gifts'")
+                log_transfer(f"⚠️ Результат не содержит атрибут 'gifts'")
+                break
+        
+        log_transfer(f"✅ Всего обработано подарков: {total_gifts}")
             
     except Exception as e:
         log_transfer(f"❌ Ошибка safe_get_chat_gifts (raw API): {type(e).__name__}: {e}", "error")
